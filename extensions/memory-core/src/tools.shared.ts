@@ -42,12 +42,13 @@ export const MemorySearchSchema = Type.Object({
 });
 
 export const MemoryGetSchema = Type.Object({
-  path: Type.String(),
+  path: Type.Optional(Type.String()),
   from: Type.Optional(Type.Number()),
   lines: Type.Optional(Type.Number()),
   corpus: Type.Optional(
     Type.Union([Type.Literal("memory"), Type.Literal("wiki"), Type.Literal("all")]),
   ),
+  id: Type.Optional(Type.String()),
 });
 
 function resolveMemoryToolContext(options: MemoryToolOptions) {

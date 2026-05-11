@@ -12,8 +12,11 @@ import {
 import { extractKeywords } from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
 import {
   readMemoryFile,
+  type MemoryBackend,
   type MemoryEmbeddingProbeResult,
+  type MemoryEntry,
   type MemoryProviderStatus,
+  type MemoryReference,
   type MemorySearchManager,
   type MemorySearchRuntimeDebug,
   type MemorySearchResult,
@@ -86,7 +89,7 @@ export async function closeAllMemoryIndexManagers(): Promise<void> {
   });
 }
 
-export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements MemorySearchManager {
+export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements MemoryBackend {
   private readonly cacheKey: string;
   protected readonly cfg: OpenClawConfig;
   protected readonly agentId: string;
@@ -310,7 +313,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       /** When set, only these chunk sources are considered (must be enabled for this manager). */
       sources?: MemorySource[];
     },
-  ): Promise<MemorySearchResult[]> {
+  ): Promise<MemoryReference[]> {
     opts?.onDebug?.({ backend: "builtin" });
     let hasIndexedContent = this.hasIndexedContent();
     if (!hasIndexedContent) {
@@ -428,7 +431,9 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         workspaceDir: this.workspaceDir,
       });
       const sorted = decayed.toSorted((a, b) => b.score - a.score);
-      return this.selectScoredResults(sorted, maxResults, minScore, 0);
+      return this.selectScoredResults(sorted, maxResults, minScore, 0).map((r) =>
+        this.toMemoryReference(r),
+      );
     }
 
     // If FTS isn't available, hybrid mode cannot use keyword search; degrade to vector-only.
@@ -455,7 +460,10 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       : [];
 
     if (!hybrid.enabled || !this.fts.enabled || !this.fts.available) {
-      return vectorResults.filter((entry) => entry.score >= minScore).slice(0, maxResults);
+      return vectorResults
+        .filter((entry) => entry.score >= minScore)
+        .slice(0, maxResults)
+        .map((r) => this.toMemoryReference(r));
     }
 
     const merged = await this.mergeHybridResults({
@@ -468,7 +476,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     });
     const strict = merged.filter((entry) => entry.score >= minScore);
     if (strict.length > 0 || keywordResults.length === 0) {
-      return strict.slice(0, maxResults);
+      return strict.slice(0, maxResults).map((r) => this.toMemoryReference(r));
     }
 
     // Hybrid defaults can produce keyword-only matches below minScore after
@@ -487,7 +495,24 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       maxResults,
       minScore,
       relaxedMinScore,
-    );
+    ).map((r) => this.toMemoryReference(r));
+  }
+
+  private toMemoryReference(
+    entry: MemorySearchResult & { id?: string },
+  ): MemoryReference {
+    return {
+      id: `file:${entry.path}:${entry.startLine}:${entry.endLine}`,
+      snippet: entry.snippet,
+      score: entry.score,
+      vectorScore: entry.vectorScore,
+      textScore: entry.textScore,
+      source: entry.source,
+      provenance: {
+        kind: "file",
+        label: `${entry.path} L${entry.startLine}-${entry.endLine}`,
+      },
+    };
   }
 
   private selectScoredResults<T extends MemorySearchResult & { score: number }>(
@@ -735,6 +760,41 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       from: params.from,
       lines: params.lines,
     });
+  }
+
+  async get(id: string): Promise<MemoryEntry> {
+    if (!id.startsWith("file:")) {
+      throw new Error(`memory-core backend only supports file:// ids, got: ${id}`);
+    }
+    const parsed = id.slice("file:".length);
+    const lastColon1 = parsed.lastIndexOf(":");
+    const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
+    if (lastColon2 < 0) {
+      throw new Error(`invalid file id format: ${id}`);
+    }
+    const relPath = parsed.slice(0, lastColon2);
+    const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
+    const endLine = Number(parsed.slice(lastColon1 + 1));
+    const lines = endLine - startLine + 1;
+    const result = await this.readFile({ relPath, from: startLine, lines });
+    return {
+      id,
+      text: result.text,
+      provenance: { kind: "file", label: `${relPath} L${startLine}-${endLine}` },
+    };
+  }
+
+  async write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
+    // Stub – full implementation in flush task
+    throw new Error("memory-core write() not yet implemented");
+  }
+
+  async recordRecall(ids: string[]): Promise<void> {
+    // Stub – delegates to short-term-promotion
+  }
+
+  async promote(ids: string[]): Promise<void> {
+    // Stub – delegates to dreaming promotion
   }
 
   status(): MemoryProviderStatus {

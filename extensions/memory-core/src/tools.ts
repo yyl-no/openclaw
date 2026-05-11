@@ -407,9 +407,33 @@ export function createMemoryGetTool(options: {
       ({ cfg, agentId }) =>
       async (_toolCallId, params) => {
         const rawParams = asToolParamsRecord(params);
-        const relPath = readStringParam(rawParams, "path", { required: true });
-        const from = readNumberParam(rawParams, "from", { integer: true });
-        const lines = readNumberParam(rawParams, "lines", { integer: true });
+        const rawPath = readStringParam(rawParams, "path");
+        const idParam = readStringParam(rawParams, "id");
+        let relPath: string;
+        let from: number | undefined;
+        let lines: number | undefined;
+        if (idParam) {
+          // Parse file://id into path+line range
+          if (!idParam.startsWith("file:")) {
+            return jsonResult({ error: `Invalid id format: ${idParam}` });
+          }
+          const parsed = idParam.slice("file:".length);
+          const lastColon1 = parsed.lastIndexOf(":");
+          const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
+          if (lastColon2 < 0) {
+            return jsonResult({ error: `Invalid file id format: ${idParam}` });
+          }
+          relPath = parsed.slice(0, lastColon2);
+          from = Number(parsed.slice(lastColon2 + 1, lastColon1));
+          const endLine = Number(parsed.slice(lastColon1 + 1));
+          lines = endLine - from + 1;
+        } else if (rawPath) {
+          relPath = rawPath;
+          from = readNumberParam(rawParams, "from", { integer: true });
+          lines = readNumberParam(rawParams, "lines", { integer: true });
+        } else {
+          return jsonResult({ error: "path or id is required" });
+        }
         const requestedCorpus = readStringParam(rawParams, "corpus") as
           | "memory"
           | "wiki"

@@ -10,7 +10,7 @@ import {
   parseUsageCountedSessionIdFromFileName,
   sessionPathForFile,
 } from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
-import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
+import type { MemoryReference, MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import {
   formatMemoryDreamingDay,
   resolveMemoryDreamingWorkspaces,
@@ -709,12 +709,14 @@ async function appendSessionCorpusLines(params: {
   return params.lines.map((entry, index) => {
     const lineNumber = existingLineCount + index + 1;
     return {
+      id: `file:${relativePath}:${lineNumber}:${lineNumber}`,
       path: relativePath,
       startLine: lineNumber,
       endLine: lineNumber,
       score: SESSION_INGESTION_SCORE,
       snippet: entry.snippet,
-      source: "memory",
+      source: "memory" as const,
+      provenance: { kind: "file" as const, label: `${relativePath} L${lineNumber}` },
     };
   });
 }
@@ -1147,12 +1149,14 @@ async function collectDailyIngestionBatches(params: {
     const results: MemorySearchResult[] = [];
     for (const chunk of chunks) {
       results.push({
+        id: `file:${relativePath}:${chunk.startLine}:${chunk.endLine}`,
         path: relativePath,
         startLine: chunk.startLine,
         endLine: chunk.endLine,
         score: DAILY_INGESTION_SCORE,
         snippet: chunk.snippet,
-        source: "memory",
+        source: "memory" as const,
+        provenance: { kind: "file" as const, label: `${relativePath} L${chunk.startLine}-${chunk.endLine}` },
       });
       if (results.length >= perFileCap || total + results.length >= totalCap) {
         break;
@@ -1298,13 +1302,16 @@ export async function seedHistoricalDailyMemorySignals(params: {
     const chunks = buildDailySnippetChunks(lines, perFileCap);
     const results: MemorySearchResult[] = [];
     for (const chunk of chunks) {
+      const remRelativePath = `memory/${entry.day}.md`;
       results.push({
-        path: `memory/${entry.day}.md`,
+        id: `file:${remRelativePath}:${chunk.startLine}:${chunk.endLine}`,
+        path: remRelativePath,
         startLine: chunk.startLine,
         endLine: chunk.endLine,
         score: DAILY_INGESTION_SCORE,
         snippet: chunk.snippet,
-        source: "memory",
+        source: "memory" as const,
+        provenance: { kind: "file" as const, label: `${remRelativePath} L${chunk.startLine}-${chunk.endLine}` },
       });
       if (results.length >= perFileCap || importedSignalCount + results.length >= totalCap) {
         break;

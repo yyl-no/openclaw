@@ -136,5 +136,6 @@ export function buildMemoryFlushPlan(
     prompt: appendCurrentTimeLine(promptBase.replaceAll("YYYY-MM-DD", dateStamp), timeLine),
     systemPrompt: systemPrompt.replaceAll("YYYY-MM-DD", dateStamp),
     relativePath,
+    backendKind: "file",
   };
 }

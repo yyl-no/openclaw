@@ -30,8 +30,11 @@ export type {
   ResolvedQmdMcporterConfig,
 } from "./host/backend-config.js";
 export type {
+  MemoryBackend,
   MemoryEmbeddingProbeResult,
+  MemoryEntry,
   MemoryProviderStatus,
+  MemoryReference,
   MemorySearchManager,
   MemorySearchRuntimeDebug,
   MemorySearchResult,

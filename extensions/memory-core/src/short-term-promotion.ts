@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
+import type { MemoryEntry, MemoryReference, MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import { formatMemoryDreamingDay } from "openclaw/plugin-sdk/memory-core-host-status";
 import { appendMemoryHostEvent } from "openclaw/plugin-sdk/memory-host-events";
 import { privateFileStore } from "openclaw/plugin-sdk/security-runtime";
@@ -64,9 +64,6 @@ const DEFAULT_PROMOTION_WEIGHTS: PromotionWeights = {
 
 export type ShortTermRecallEntry = {
   key: string;
-  path: string;
-  startLine: number;
-  endLine: number;
   source: "memory";
   snippet: string;
   recallCount: number;
@@ -303,15 +300,28 @@ function buildClaimHash(snippet: string): string {
   return createHash("sha1").update(normalizeSnippet(snippet)).digest("hex").slice(0, 12);
 }
 
+function parseFileId(key: string): { path: string; startLine: number; endLine: number } | null {
+  if (!key.startsWith("file:")) return null;
+  const inner = key.slice("file:".length);
+  const c1 = inner.lastIndexOf(":");
+  const c2 = inner.lastIndexOf(":", c1 - 1);
+  if (c2 < 0) return null;
+  return {
+    path: normalizeMemoryPath(inner.slice(0, c2)),
+    startLine: Number(inner.slice(c2 + 1, c1)),
+    endLine: Number(inner.slice(c1 + 1)),
+  };
+}
+
+function entryFilePath(entry: ShortTermRecallEntry): string {
+  return parseFileId(entry.key)?.path ?? "";
+}
+
 function buildEntryKey(result: {
-  path: string;
-  startLine: number;
-  endLine: number;
-  source: string;
-  claimHash?: string;
+  id: string;
+  source?: string;
 }): string {
-  const base = `${result.source}:${normalizeMemoryPath(result.path)}:${result.startLine}:${result.endLine}`;
-  return result.claimHash ? `${base}:${result.claimHash}` : base;
+  return result.id;
 }
 
 function hashQuery(query: string): string {
@@ -490,12 +500,9 @@ function normalizeStore(raw: unknown, nowIso: string): ShortTermRecallStore {
         : deriveConceptTags({ path: entryPath, snippet });
 
       const normalizedKey =
-        key || buildEntryKey({ path: entryPath, startLine, endLine, source, claimHash });
+        key || buildEntryKey({ id: `file:${entryPath}:${startLine}:${endLine}` });
       entries[normalizedKey] = {
         key: normalizedKey,
-        path: entryPath,
-        startLine,
-        endLine,
         source,
         snippet,
         recallCount,
@@ -872,13 +879,14 @@ export function isShortTermMemoryPath(filePath: string): boolean {
 
 async function shortTermRecallSourceExists(params: {
   workspaceDir: string;
-  entry: Pick<ShortTermRecallEntry, "path">;
+  entry: Pick<ShortTermRecallEntry, "key">;
 }): Promise<boolean> {
   const workspaceDir = params.workspaceDir.trim();
   if (!workspaceDir) {
     return false;
   }
-  for (const sourcePath of resolveShortTermSourcePathCandidates(workspaceDir, params.entry.path)) {
+  const filePath = entryFilePath(params.entry as ShortTermRecallEntry);
+  for (const sourcePath of resolveShortTermSourcePathCandidates(workspaceDir, filePath)) {
     try {
       const stat = await fs.stat(sourcePath);
       if (stat.isFile()) {
@@ -910,7 +918,7 @@ export async function filterLiveShortTermRecallEntries(params: {
 export async function recordShortTermRecalls(params: {
   workspaceDir?: string;
   query: string;
-  results: MemorySearchResult[];
+  results: MemoryReference[];
   signalType?: "recall" | "daily";
   dedupeByQueryPerDay?: boolean;
   dayBucket?: string;
@@ -926,7 +934,12 @@ export async function recordShortTermRecalls(params: {
     return;
   }
   const relevant = params.results.filter(
-    (result) => result.source === "memory" && isShortTermMemoryPath(result.path),
+    (result) => {
+      if (result.source !== "memory") return false;
+      if (result.provenance?.kind !== "file") return false;
+      const parsed = result.id.startsWith("file:") ? result.id.slice("file:".length) : result.id;
+      return SHORT_TERM_PATH_RE.test(parsed);
+    },
   );
   if (relevant.length === 0) {
     return;
@@ -942,23 +955,18 @@ export async function recordShortTermRecalls(params: {
     const store = await readStore(workspaceDir, nowIso);
 
     for (const result of relevant) {
-      const normalizedPath = normalizeMemoryPath(result.path);
+      const parsedId = result.id.startsWith("file:") ? result.id.slice("file:".length) : result.id;
+      const lastColon1 = parsedId.lastIndexOf(":");
+      const lastColon2 = parsedId.lastIndexOf(":", lastColon1 - 1);
+      const normalizedPath =
+        lastColon2 >= 0 ? normalizeMemoryPath(parsedId.slice(0, lastColon2)) : parsedId;
       const snippet = normalizeSnippet(result.snippet);
       if (!snippet || isContaminatedDreamingSnippet(snippet)) {
         continue;
       }
       const claimHash = snippet ? buildClaimHash(snippet) : undefined;
-      const groundedKey = claimHash
-        ? buildEntryKey({
-            path: normalizedPath,
-            startLine: Math.max(1, Math.floor(result.startLine)),
-            endLine: Math.max(1, Math.floor(result.endLine)),
-            source: "memory",
-            claimHash,
-          })
-        : null;
-      const baseKey = buildEntryKey(result);
-      const key = groundedKey && store.entries[groundedKey] ? groundedKey : baseKey;
+      const baseKey = buildEntryKey({ id: result.id });
+      const key = baseKey;
       const existing = store.entries[key];
       const score = clampScore(result.score);
       const recallDaysBase = existing?.recallDays ?? [];
@@ -983,9 +991,6 @@ export async function recordShortTermRecalls(params: {
 
       store.entries[key] = {
         key,
-        path: normalizedPath,
-        startLine: Math.max(1, Math.floor(result.startLine)),
-        endLine: Math.max(1, Math.floor(result.endLine)),
         source: "memory",
         snippet: snippet || existing?.snippet || "",
         recallCount,
@@ -1011,9 +1016,7 @@ export async function recordShortTermRecalls(params: {
       query,
       resultCount: relevant.length,
       results: relevant.map((result) => ({
-        path: normalizeMemoryPath(result.path),
-        startLine: Math.max(1, Math.floor(result.startLine)),
-        endLine: Math.max(1, Math.floor(result.endLine)),
+        id: result.id,
         score: clampScore(result.score),
       })),
     });
@@ -1232,7 +1235,7 @@ export async function rankShortTermPromotionCandidates(
   const candidates: PromotionCandidate[] = [];
 
   for (const entry of Object.values(store.entries)) {
-    if (!entry || entry.source !== "memory" || !isShortTermMemoryPath(entry.path)) {
+    if (!entry || entry.source !== "memory" || !isShortTermMemoryPath(entryFilePath(entry))) {
       continue;
     }
     if (isContaminatedDreamingSnippet(entry.snippet)) {
@@ -1290,11 +1293,12 @@ export async function rankShortTermPromotionCandidates(
       continue;
     }
 
+    const fileInfo = parseFileId(entry.key);
     candidates.push({
       key: entry.key,
-      path: entry.path,
-      startLine: entry.startLine,
-      endLine: entry.endLine,
+      path: fileInfo?.path ?? "",
+      startLine: fileInfo?.startLine ?? 1,
+      endLine: fileInfo?.endLine ?? 1,
       source: entry.source,
       snippet: entry.snippet,
       recallCount,
@@ -1352,7 +1356,7 @@ export async function readShortTermRecallEntries(params: {
   const store = await readStore(workspaceDir, nowIso);
   return Object.values(store.entries).filter(
     (entry): entry is ShortTermRecallEntry =>
-      Boolean(entry) && entry.source === "memory" && isShortTermMemoryPath(entry.path),
+      Boolean(entry) && entry.source === "memory" && isShortTermMemoryPath(entryFilePath(entry)),
   );
 }
 
@@ -1653,8 +1657,6 @@ export async function applyShortTermPromotions(
       if (!entry) {
         continue;
       }
-      entry.startLine = candidate.startLine;
-      entry.endLine = candidate.endLine;
       entry.snippet = candidate.snippet;
       entry.promotedAt = nowIso;
     }
@@ -1884,7 +1886,7 @@ export async function repairShortTermPromotionArtifacts(params: {
       removedInvalidEntries = Math.max(0, rawEntries - Object.keys(normalized.entries).length);
       const nextEntries = Object.fromEntries(
         Object.entries(normalized.entries).map(([key, entry]) => {
-          const conceptTags = deriveConceptTags({ path: entry.path, snippet: entry.snippet });
+          const conceptTags = deriveConceptTags({ path: entryFilePath(entry), snippet: entry.snippet });
           const fallbackDay = normalizeIsoDay(entry.lastRecalledAt) ?? nowIso.slice(0, 10);
           return [
             key,

@@ -1,5 +1,6 @@
 export type MemorySource = "memory" | "sessions";
 
+/** @deprecated Use `MemoryReference` instead. */
 export type MemorySearchResult = {
   path: string;
   startLine: number;
@@ -10,6 +11,20 @@ export type MemorySearchResult = {
   snippet: string;
   source: MemorySource;
   citation?: string;
+};
+
+/** New: search result with backend-neutral id */
+export type MemoryReference = {
+  id: string;
+  snippet: string;
+  score: number;
+  vectorScore?: number;
+  textScore?: number;
+  source?: MemorySource;
+  provenance: {
+    kind: "file" | "milvus";
+    label: string;
+  };
 };
 
 export type MemoryEmbeddingProbeResult = {
@@ -34,6 +49,7 @@ export type MemorySearchRuntimeDebug = {
   fallback?: string;
 };
 
+/** @deprecated Use `MemoryEntry` instead. */
 export type MemoryReadResult = {
   text: string;
   path: string;
@@ -41,6 +57,23 @@ export type MemoryReadResult = {
   from?: number;
   lines?: number;
   nextFrom?: number;
+};
+
+/** New: backend-neutral memory entry */
+export type MemoryEntry = {
+  id: string;
+  text: string;
+  snippet?: string;
+  agentId?: string;
+  sessionKey?: string;
+  memoryType?: "short_term" | "long_term" | "archived";
+  recallCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  provenance: {
+    kind: "file" | "milvus";
+    label: string;
+  };
 };
 
 export type MemoryProviderStatus = {
@@ -82,6 +115,7 @@ export type MemoryProviderStatus = {
   custom?: Record<string, unknown>;
 };
 
+/** @deprecated Use `MemoryBackend` instead. */
 export interface MemorySearchManager {
   search(
     query: string,
@@ -106,5 +140,31 @@ export interface MemorySearchManager {
   probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult>;
   probeVectorStoreAvailability?(): Promise<boolean>;
   probeVectorAvailability(): Promise<boolean>;
+  close?(): Promise<void>;
+}
+
+/** New: unified memory backend interface */
+export interface MemoryBackend {
+  search(
+    query: string,
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      sessionKey?: string;
+      agentId?: string;
+      sources?: MemorySource[];
+    },
+  ): Promise<MemoryReference[]>;
+  get(id: string): Promise<MemoryEntry>;
+  write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference>;
+  recordRecall(ids: string[]): Promise<void>;
+  promote(ids: string[]): Promise<void>;
+  status(): MemoryProviderStatus;
+  sync?(params?: {
+    reason?: string;
+    force?: boolean;
+    sessionFiles?: string[];
+    progress?: (update: MemorySyncProgressUpdate) => void;
+  }): Promise<void>;
   close?(): Promise<void>;
 }

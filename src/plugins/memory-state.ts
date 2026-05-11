@@ -71,7 +71,8 @@ export type MemoryFlushPlan = {
   model?: string;
   prompt: string;
   systemPrompt: string;
-  relativePath: string;
+  relativePath?: string;
+  backendKind?: "file" | "milvus";
 };
 
 export type MemoryFlushPlanResolver = (params: {
