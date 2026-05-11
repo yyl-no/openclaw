@@ -50,7 +50,7 @@ export type MemoryEmbeddingProbeResult = {
 };
 
 export type {
-  MemoryBackend,
+  MemoryDataBackend,
   MemoryChunk,
   MemoryEntry,
   MemoryFileEntry,

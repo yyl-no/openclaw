@@ -45,7 +45,7 @@
 
 ---
 
-### Task 3: 演化 MemorySearchManager → MemoryBackend ✅ 完成
+### Task 3: 演化 MemorySearchManager → MemoryDataBackend ✅ 完成
 
 **日期**：2026-05-11
 
@@ -62,7 +62,7 @@
 
 ---
 
-### Task 4: 重构 memory-core 实现 MemoryBackend ✅ 完成
+### Task 4: 重构 memory-core 实现 MemoryDataBackend ✅ 完成
 
 **日期**：2026-05-11
 
@@ -70,9 +70,9 @@
 
 **改动文件及内容**：
 
-1. `packages/memory-host-sdk/.../types.ts` — 新增 `MemoryBackend`、`MemoryReference`、`MemoryEntry` 类型，旧类型标记 `@deprecated`
+1. `packages/memory-host-sdk/.../types.ts` — 新增 `MemoryDataBackend`、`MemoryReference`、`MemoryEntry` 类型，旧类型标记 `@deprecated`
 2. `engine-storage.ts` / `runtime-files.ts` — 导出新类型
-3. `manager.ts` — `implements MemoryBackend`，`search()` 返回 `MemoryReference[]`，新增 `get(id)`/`write()`/`recordRecall()`/`promote()` 
+3. `manager.ts` — `implements MemoryDataBackend`，`search()` 返回 `MemoryReference[]`，新增 `get(id)`/`write()`/`recordRecall()`/`promote()` 
 4. `tools.shared.ts` — `MemoryGetSchema` 加 `id` 字段，`path` 改为 optional
 5. `tools.ts` — `memory_get` 处理 `id` 参数（解析为 path+line）
 6. `memory-state.ts` — `MemoryFlushPlan` 的 `relativePath` 改为 optional，加 `backendKind`
@@ -113,6 +113,26 @@
 5. `agent-runner-memory.ts` — 从 `activeMemoryFlushPlan.backendKind` 提取并传递
 
 **编译**：tsdown 通过，仅预存路径空格 bug（`build:plugin-sdk:dts`）与本次无关。
+
+---
+
+### 修复: 接口命名冲突 → MemoryDataBackend ✅ 完成
+
+**日期**：2026-05-12
+
+**问题**：`engine.ts` 中 `export *` 同时从 `engine-foundation.ts`（config `MemoryBackend = "builtin" | "qmd"`）和 `engine-storage.ts`（新 interface `MemoryBackend`）导入，TS 编译器报 TS2308 命名歧义。
+
+**决策**：不动 config 端（系统基础类型，引用广泛），仅将新 interface 重命名为 `MemoryDataBackend`。
+
+**改动 5 个文件**：
+- `types.ts` — interface `MemoryDataBackend`，deprecation 注释同步
+- `engine-storage.ts` / `runtime-files.ts` — export type 改名
+- `memory-core-host-engine-storage.ts` — re-export 改名
+- `manager.ts` — `import type` + `implements` 改名
+
+**同步文档**：`1-plan.md`（6处）、`2-decisions.md`（4处）、`0-progress.md`（4处）中接口引用全部更新。
+
+**编译验证**：`tsconfig.plugin-sdk.dts.json` 通过，TS2308 消除。
 
 ---
 

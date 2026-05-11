@@ -115,7 +115,7 @@ export type MemoryProviderStatus = {
   custom?: Record<string, unknown>;
 };
 
-/** @deprecated Use `MemoryBackend` instead. */
+/** @deprecated Use `MemoryDataBackend` instead. */
 export interface MemorySearchManager {
   search(
     query: string,
@@ -143,8 +143,8 @@ export interface MemorySearchManager {
   close?(): Promise<void>;
 }
 
-/** New: unified memory backend interface */
-export interface MemoryBackend {
+/** New: unified memory data backend interface */
+export interface MemoryDataBackend {
   search(
     query: string,
     opts?: {

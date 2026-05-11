@@ -4,7 +4,7 @@ export { listMemoryFiles, normalizeExtraMemoryPaths } from "./host/internal.js";
 export { readAgentMemoryFile } from "./host/read-file.js";
 export { resolveMemoryBackendConfig } from "./host/backend-config.js";
 export type {
-  MemoryBackend,
+  MemoryDataBackend,
   MemoryReference,
   MemorySearchManager,
   MemorySearchRuntimeDebug,

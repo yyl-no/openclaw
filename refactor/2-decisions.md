@@ -6,7 +6,7 @@
 
 ## 1. 接口重构原则
 
-- `MemorySearchManager` → `MemoryBackend`（重命名 + 扩展，不并存）
+- `MemorySearchManager` → `MemoryDataBackend`（重命名 + 扩展，不并存）
 - `MemorySearchResult` → `MemoryReference`（path/line 编码进 id）
 - `MemoryReadResult` → `MemoryEntry`（扩展为通用条目）
 - `write` / `recordRecall` / `promote` 从散落各处收拢到接口
@@ -42,7 +42,7 @@ type MemoryEntry = {
   provenance: { kind: "file" | "milvus"; label: string };
 };
 
-interface MemoryBackend {
+interface MemoryDataBackend {
   search(query, opts) → MemoryReference[];
   get(id: string) → MemoryEntry;
   write(entry) → MemoryReference;
@@ -211,8 +211,8 @@ memory-milvus 采用**混合检索（ANN + 关键词）**，与 memory-core 行�
 
 | 文件 | 改动 |
 |------|------|
-| `packages/memory-host-sdk/.../types.ts` | MemorySearchManager→MemoryBackend，类型演化 |
-| `extensions/memory-core/src/memory/manager.ts` | `implements MemoryBackend` |
+| `packages/memory-host-sdk/.../types.ts` | MemorySearchManager→MemoryDataBackend，类型演化 |
+| `extensions/memory-core/src/memory/manager.ts` | `implements MemoryDataBackend` |
 | `extensions/memory-core/src/tools.ts` | memory_get schema 改为 id |
 | `extensions/memory-core/src/flush-plan.ts` | 加 backendKind |
 | `extensions/memory-core/src/short-term-promotion.ts` | key 改为 id |

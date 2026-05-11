@@ -3,7 +3,7 @@
 ## 总原则
 
 - 不新增接口，而是**演化和收敛**现有接口
-- `MemorySearchManager` → `MemoryBackend`（原地升级，不并存）
+- `MemorySearchManager` → `MemoryDataBackend`（原地升级，不并存）
 - `MemorySearchResult` → `MemoryReference`（path/line 编码进 id）
 - `MemoryReadResult` → `MemoryEntry`（扩展为通用条目）
 - `write` / `recordRecall` / `promote` 从散落各处收敛到接口
@@ -33,9 +33,9 @@
 - `MemoryReadResult`（text/path/from/lines）→ 演化为 `MemoryEntry`（id/text/agentId/sessionKey/memoryType/recallCount/createdAt/metadata/provenance）
 - `MemoryFlushPlan.relativePath` → optional + 新增 `backendKind`
 
-### Task 3: 演化 MemorySearchManager → MemoryBackend
+### Task 3: 演化 MemorySearchManager → MemoryDataBackend
 
-将现有 `MemorySearchManager` 接口**重命名**为 `MemoryBackend`，并收敛散落逻辑：
+将现有 `MemorySearchManager` 接口**重命名**为 `MemoryDataBackend`，并收敛散落逻辑：
 
 | 原接口方法 | 演化后 | 来源 |
 |-----------|--------|------|
@@ -55,13 +55,13 @@
 Milvus:   id = "453218790342567891"（主键） → PK 查询
 ```
 
-### Task 4: 重构 memory-core 实现 MemoryBackend
+### Task 4: 重构 memory-core 实现 MemoryDataBackend
 
 **改动文件及内容：**
 
-1. `packages/memory-host-sdk/src/host/types.ts` — `MemorySearchManager`→`MemoryBackend`，`MemorySearchResult`→`MemoryReference`，`MemoryReadResult`→`MemoryEntry`
+1. `packages/memory-host-sdk/src/host/types.ts` — `MemorySearchManager`→`MemoryDataBackend`，`MemorySearchResult`→`MemoryReference`，`MemoryReadResult`→`MemoryEntry`
 
-2. `extensions/memory-core/src/memory/manager.ts` — `MemoryIndexManager implements MemoryBackend`：
+2. `extensions/memory-core/src/memory/manager.ts` — `MemoryIndexManager implements MemoryDataBackend`：
    - `search()` 返回 `MemoryReference[]`（provenance.kind="file"）
    - `get(id)` 解析 id 中的 path+line，读文件
    - `write(entry)` append 到 `memory/YYYY-MM-DD.md`

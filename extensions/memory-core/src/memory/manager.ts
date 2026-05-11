@@ -12,7 +12,7 @@ import {
 import { extractKeywords } from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
 import {
   readMemoryFile,
-  type MemoryBackend,
+  type MemoryDataBackend,
   type MemoryEmbeddingProbeResult,
   type MemoryEntry,
   type MemoryProviderStatus,
@@ -89,7 +89,7 @@ export async function closeAllMemoryIndexManagers(): Promise<void> {
   });
 }
 
-export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements MemoryBackend {
+export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements MemoryDataBackend {
   private readonly cacheKey: string;
   protected readonly cfg: OpenClawConfig;
   protected readonly agentId: string;
