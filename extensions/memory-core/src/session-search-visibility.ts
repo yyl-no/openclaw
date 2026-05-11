@@ -1,5 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
+import type { MemoryReference, MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import {
   extractTranscriptIdentityFromSessionsMemoryHit,
   loadCombinedSessionStoreForGateway,
@@ -11,12 +11,26 @@ import {
   resolveEffectiveSessionToolsVisibility,
 } from "openclaw/plugin-sdk/session-visibility";
 
+type SearchHit = { source?: string; path?: string; id?: string };
+
+function hitFilePath(hit: SearchHit): string {
+  if (hit.path) return hit.path;
+  if (hit.id?.startsWith("file:")) {
+    const inner = hit.id.slice("file:".length);
+    const c1 = inner.lastIndexOf(":");
+    const c2 = inner.lastIndexOf(":", c1 - 1);
+    if (c2 >= 0) return inner.slice(0, c2);
+    return inner;
+  }
+  return "";
+}
+
 export async function filterMemorySearchHitsBySessionVisibility(params: {
   cfg: OpenClawConfig;
   requesterSessionKey: string | undefined;
   sandboxed: boolean;
-  hits: MemorySearchResult[];
-}): Promise<MemorySearchResult[]> {
+  hits: (MemorySearchResult | MemoryReference)[];
+}): Promise<(MemorySearchResult | MemoryReference)[]> {
   const visibility = resolveEffectiveSessionToolsVisibility({
     cfg: params.cfg,
     sandboxed: params.sandboxed,
@@ -33,7 +47,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
 
   const { store: combinedSessionStore } = loadCombinedSessionStoreForGateway(params.cfg);
 
-  const next: MemorySearchResult[] = [];
+  const next: (MemorySearchResult | MemoryReference)[] = [];
   for (const hit of params.hits) {
     if (hit.source !== "sessions") {
       next.push(hit);
@@ -42,7 +56,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     if (!params.requesterSessionKey || !guard) {
       continue;
     }
-    const identity = extractTranscriptIdentityFromSessionsMemoryHit(hit.path);
+    const identity = extractTranscriptIdentityFromSessionsMemoryHit(hitFilePath(hit));
     if (!identity) {
       continue;
     }

@@ -80,7 +80,22 @@
 8. `short-term-promotion.ts` — `ShortTermRecallEntry` 删 path/startLine/endLine，`buildEntryKey` 返回 id，`recordShortTermRecalls` 接受 `MemoryReference[]`
 9. `dreaming-phases.ts` — chunk 结果增加 `id` + `provenance` 字段
 
-**注意**：`tools.ts` 中 `memory_search` 的处理逻辑仍引用 `MemorySearchResult` 类型，Task 5 将完成语义迁移。
+**注意**：`tools.ts` 中 `memory_search` 语义迁移由 Task 5 完成。
+
+---
+
+### Task 5: 改造 memory_search / memory_get 语义 ✅ 完成
+
+**日期**：2026-05-11
+
+**依据**：`1-plan.md` §Task5 + `2-decisions.md` §2
+
+**改动**：
+1. `tools.citations.ts` — `decorateCitations`/`clampResultsByInjectedChars` 改为泛型，`formatCitation` 优先使用 `provenance.label`，兼容旧的 `path/startLine/endLine`
+2. `session-search-visibility.ts` — 接受 `MemoryReference | MemorySearchResult` 联合，`hitFilePath` 从 `id` 或 `path` 提取
+3. `tools.ts` — `rawResults` → `MemoryReference[]`，`buildRecallKey` 支持 id，`resolveRecallTrackingResults` 泛型化，`queueShortTermRecallTracking` 接受 `MemoryReference[]`，`surfacedMemoryResults` 从 `provenance.label` 派生 `displayPath`
+
+`promptBuilder` 暂不变动，memory-milvus 阶段根据后端类型调整。
 
 ---
 

@@ -9,6 +9,7 @@ import {
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type {
+  MemoryReference,
   MemorySearchResult,
   MemorySearchRuntimeDebug,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
@@ -37,7 +38,7 @@ import {
 } from "./tools.shared.js";
 
 type MemorySearchToolResult =
-  | (Record<string, unknown> & { corpus: "memory"; score: number; path: string })
+  | (Record<string, unknown> & { corpus: "memory"; score: number; path: string; id?: string })
   | MemoryCorpusSearchResult;
 
 function sortMemorySearchToolResults<T extends { score: number; path: string }>(results: T[]): T[] {
@@ -81,40 +82,42 @@ function mergeMemorySearchCorpusResults(params: {
 }
 
 function buildRecallKey(
-  result: Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">,
+  result: { id: string } | Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">,
 ): string {
-  return `${result.source}:${result.path}:${result.startLine}:${result.endLine}`;
+  if ("id" in result && result.id) return result.id;
+  const r = result as MemorySearchResult;
+  return `${r.source}:${r.path}:${r.startLine}:${r.endLine}`;
 }
 
-function resolveRecallTrackingResults(
-  rawResults: MemorySearchResult[],
-  surfacedResults: MemorySearchResult[],
-): MemorySearchResult[] {
+function resolveRecallTrackingResults<T extends { id?: string; source?: string; path?: string; startLine?: number; endLine?: number }>(
+  rawResults: T[],
+  surfacedResults: T[],
+): T[] {
   if (surfacedResults.length === 0 || rawResults.length === 0) {
     return surfacedResults;
   }
-  const rawByKey = new Map<string, MemorySearchResult>();
+  const rawByKey = new Map<string, T>();
   for (const raw of rawResults) {
-    const key = buildRecallKey(raw);
+    const key = buildRecallKey(raw as any);
     if (!rawByKey.has(key)) {
       rawByKey.set(key, raw);
     }
   }
-  return surfacedResults.map((surfaced) => rawByKey.get(buildRecallKey(surfaced)) ?? surfaced);
+  return surfacedResults.map((surfaced) => rawByKey.get(buildRecallKey(surfaced as any)) ?? surfaced);
 }
 
 function queueShortTermRecallTracking(params: {
   workspaceDir?: string;
   query: string;
-  rawResults: MemorySearchResult[];
-  surfacedResults: MemorySearchResult[];
+  rawResults: MemoryReference[];
+  surfacedResults: MemoryReference[];
   timezone?: string;
 }): void {
   const trackingResults = resolveRecallTrackingResults(params.rawResults, params.surfacedResults);
   void recordShortTermRecalls({
     workspaceDir: params.workspaceDir,
     query: params.query,
-    results: trackingResults,
+    results: trackingResults as MemoryReference[],
     timezone: params.timezone,
   }).catch(() => {
     // Recall tracking is best-effort and must never block memory recall.
@@ -266,7 +269,7 @@ export function createMemorySearchTool(options: {
             sessionKey: options.agentSessionKey,
           });
           const searchStartedAt = Date.now();
-          let rawResults: MemorySearchResult[] = [];
+          let rawResults: MemoryReference[] = [];
           let surfacedMemoryResults: Array<
             Record<string, unknown> & { corpus: "memory"; score: number; path: string }
           > = [];
@@ -306,12 +309,12 @@ export function createMemorySearchTool(options: {
               },
               ...(searchSources ? { sources: searchSources } : {}),
             });
-            rawResults = await filterMemorySearchHitsBySessionVisibility({
+            rawResults = (await filterMemorySearchHitsBySessionVisibility({
               cfg,
               requesterSessionKey: options.agentSessionKey,
               sandboxed: options.sandboxed === true,
               hits: rawResults,
-            });
+            })) as MemoryReference[];
             if (requestedCorpus === "sessions") {
               rawResults = rawResults.filter((hit) => hit.source === "sessions");
             } else if (requestedCorpus === "memory") {
@@ -324,10 +327,14 @@ export function createMemorySearchTool(options: {
               status.backend === "qmd"
                 ? clampResultsByInjectedChars(decorated, resolved.qmd?.limits.maxInjectedChars)
                 : decorated;
-            surfacedMemoryResults = memoryResults.map((result) => ({
-              ...result,
-              corpus: "memory" as const,
-            }));
+            surfacedMemoryResults = memoryResults.map((result) => {
+              const displayPath = result.provenance?.label ?? result.id ?? "";
+              return {
+                ...result,
+                corpus: "memory" as const,
+                path: displayPath,
+              };
+            });
             const sleepTimezone = resolveMemoryDeepDreamingConfig({
               pluginConfig: resolveMemoryCorePluginConfig(cfg),
               cfg,
@@ -336,7 +343,7 @@ export function createMemorySearchTool(options: {
               workspaceDir: status.workspaceDir,
               query,
               rawResults,
-              surfacedResults: memoryResults,
+              surfacedResults: memoryResults as MemoryReference[],
               timezone: sleepTimezone,
             });
             provider = status.provider;

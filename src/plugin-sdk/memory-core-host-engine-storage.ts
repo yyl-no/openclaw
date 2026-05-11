@@ -27,6 +27,7 @@ export {
 
 export type MemorySource = "memory" | "sessions";
 
+/** @deprecated Use MemoryReference instead */
 export type MemorySearchResult = {
   path: string;
   startLine: number;
@@ -49,10 +50,13 @@ export type MemoryEmbeddingProbeResult = {
 };
 
 export type {
+  MemoryBackend,
   MemoryChunk,
+  MemoryEntry,
   MemoryFileEntry,
   MemoryProviderStatus,
   MemoryReadResult,
+  MemoryReference,
   MemorySearchManager,
   MemorySearchRuntimeDebug,
   MemorySyncProgressUpdate,
