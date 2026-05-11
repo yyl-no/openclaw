@@ -47,6 +47,8 @@ export type RunEmbeddedPiAgentParams = {
   jobId?: string;
   /** Relative workspace path that memory-triggered writes are allowed to append to. */
   memoryFlushWritePath?: string;
+  /** Backend kind for memory-triggered flush (controls write-tool wrapping). */
+  memoryFlushBackendKind?: "file" | "milvus";
   /** Delivery target for topic/thread routing. */
   messageTo?: string;
   /** Thread/topic identifier for routing replies to the originating thread. */

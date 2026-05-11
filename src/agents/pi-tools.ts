@@ -311,6 +311,8 @@ export function createOpenClawCodingTools(options?: {
   jobId?: string;
   /** Relative workspace path that memory-triggered writes may append to. */
   memoryFlushWritePath?: string;
+  /** Backend kind for memory-triggered flush (file wraps write tool, milvus leaves it native). */
+  memoryFlushBackendKind?: "file" | "milvus";
   agentDir?: string;
   workspaceDir?: string;
   /**
@@ -413,9 +415,10 @@ export function createOpenClawCodingTools(options?: {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
   const isMemoryFlushRun = options?.trigger === "memory";
-  if (isMemoryFlushRun && !options?.memoryFlushWritePath) {
+  if (isMemoryFlushRun && options?.memoryFlushBackendKind !== "milvus" && !options?.memoryFlushWritePath) {
     throw new Error("memoryFlushWritePath required for memory-triggered tool runs");
   }
+  const isMilvusBackend = options?.memoryFlushBackendKind === "milvus";
   const memoryFlushWritePath = isMemoryFlushRun ? options.memoryFlushWritePath : undefined;
   const cronSelfRemoveOnlyJobId =
     options?.trigger === "cron" &&
@@ -846,13 +849,13 @@ export function createOpenClawCodingTools(options?: {
     ...toolSearchTools,
   ];
   options?.recordToolPrepStage?.("openclaw-tools");
-  const toolsForMemoryFlush: AnyAgentTool[] = isMemoryFlushRun && memoryFlushWritePath ? [] : tools;
-  if (isMemoryFlushRun && memoryFlushWritePath) {
+  const toolsForMemoryFlush: AnyAgentTool[] = isMemoryFlushRun ? [] : tools;
+  if (isMemoryFlushRun) {
     for (const tool of tools) {
       if (!MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has(tool.name)) {
         continue;
       }
-      if (tool.name === "write") {
+      if (tool.name === "write" && !isMilvusBackend && memoryFlushWritePath) {
         toolsForMemoryFlush.push(
           wrapToolMemoryFlushAppendOnlyWrite(tool, {
             root: sandboxRoot ?? workspaceRoot,

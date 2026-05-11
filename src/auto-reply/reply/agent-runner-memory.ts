@@ -902,6 +902,7 @@ export async function runMemoryFlushIfNeeded(params: {
       nowMs: memoryFlushNowMs,
     }) ?? memoryFlushPlan;
   const memoryFlushWritePath = activeMemoryFlushPlan.relativePath;
+  const memoryFlushBackendKind = activeMemoryFlushPlan.backendKind;
   const flushSystemPrompt = [
     params.followupRun.run.extraSystemPrompt,
     activeMemoryFlushPlan.systemPrompt,
@@ -939,6 +940,7 @@ export async function runMemoryFlushIfNeeded(params: {
           silentExpected: true,
           trigger: "memory",
           memoryFlushWritePath,
+          memoryFlushBackendKind,
           prompt: activeMemoryFlushPlan.prompt,
           transcriptPrompt: "",
           extraSystemPrompt: flushSystemPrompt,

@@ -99,6 +99,23 @@
 
 ---
 
+### Task 6: 重构 flush 写入流程 ✅ 完成
+
+**日期**：2026-05-11
+
+**依据**：`1-plan.md` §Task6 + `2-decisions.md` §3
+
+**改动**：
+1. `pi-tools.ts` — 新增 `memoryFlushBackendKind` 选项；验证仅在非 milvus 时要求 `memoryFlushWritePath`；milvus 时跳过 `wrapToolMemoryFlushAppendOnlyWrite`（write 工具原生通过）；flush 时始终过滤工具白名单
+2. `params.ts` — 新增 `memoryFlushBackendKind?: "file" | "milvus"`
+3. `attempt.tool-run-context.ts` — 转发 `memoryFlushBackendKind`
+4. `run.ts` — 转发 `memoryFlushBackendKind` 到 backend
+5. `agent-runner-memory.ts` — 从 `activeMemoryFlushPlan.backendKind` 提取并传递
+
+**编译**：tsdown 通过，仅预存路径空格 bug（`build:plugin-sdk:dts`）与本次无关。
+
+---
+
 ## 第二部分：memory-milvus 实现
 
 尚未开始。
