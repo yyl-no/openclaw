@@ -328,3 +328,33 @@
 - TS2304: `FIELD_CREATED_AT` 未导入 → 🔧 在 search.ts 中添加 `FIELD_CREATED_AT` 导入
 - tsdown optional peerDependency `unrun` 缺失导致 `pnpm build` 失败 → 🔧 `pnpm add -D unrun -w` 修复
 
+---
+
+### Task 10-S1: 类型契约与常量枚举打底 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task10-S1 + `2-decisions.md` §12.2/12.3/10.2
+
+**改动文件**：
+
+| 文件 | 内容 |
+|------|------|
+| `extensions/memory-milvus/src/types.ts`（新建，96行） | `MEMORY_SOURCE_LABELS`（4个常量）、`MEMORY_TYPES`（3个常量）、`MemorySourceLabel`/`MemoryType` 类型别名、`assertValidSourceLabel()`/`assertValidMemoryType()` 校验函数、`MilvusMemoryEntryMetadata` 接口 |
+| `extensions/memory-milvus/src/types.test.ts`（新建，228行） | 28个单测用例：覆盖枚举值正确性、合法/越界校验、类型收窄、`MilvusMemoryEntryMetadata` 结构兼容性 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus/src/types.test.ts` → 28 tests passed，1 file，138ms
+- `pnpm build` → 全绿（tsdown + plugin-sdk dts + exports check 通过）
+- `pnpm tsgo:extensions` → memory-milvus **零错误**（报告的 11 个错误全部在 memory-core 预存错误中）
+
+**MilvusMemoryEntryMetadata 字段来源分工**（`2-decisions.md` §12.2）：
+
+| 字段 | 来源 | 类型 |
+|------|------|------|
+| `agentId` | Host 注入 | `string` |
+| `sessionKey` | Host/Manager 注入（optional） | `string \| undefined` |
+| `memoryType` | Manager 默认 `"short_term"` | `MemoryType` |
+| `createdAt` | Manager UTC 毫秒数 | `number` |
+| `provenance.label` | Tool/Manager 注入 | `MemorySourceLabel` |
+

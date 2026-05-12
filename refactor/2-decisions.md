@@ -330,3 +330,99 @@ API v2 或管理工具（pymilvus / Attu）手动创建后再对接。
 - `wrapToolMemoryFlushAppendOnlyWrite` **保留**，作为 AI 误用 file write 时的安全兜底
 - 旧 `memory/*.md` 文件格式不变，无数据迁移
 - 分阶段实施降低回归风险（详细执行计划见 `1-plan.md` §方案 H 执行计划，拆分为 H-A / H-B 两段独立执行）
+
+## 12. Task 10 实施细节决策
+
+> 本节为 Task 10「重写写入 capture/flush 流程」的实施细节决策。
+> **与 §11 的关系**：§11 的"解读 B（单路径统一）"是最终目标；Task 10 当下采用**路线 A 分阶段渐进**——先让 milvus 后端可用（双路径并存），Task 16 之后再合并到 B。
+
+### 12.1 Milvus Collection 生命周期
+
+- **Eager init**：插件 `init` 阶段即创建 Collection，不延迟到首次写入
+- **原子化三步**：`create_collection` → `create_index`（向量字段 HNSW）→ `load_collection`
+- **幂等**：每一步前先 `describe_collection` / `has_index` 探测存在，已存在则跳过
+- **重启检查**：每次 init 必检 loaded 状态，未 loaded 则补 `load_collection`
+- **动态字段策略**：采用"固定 schema + 一个 `metadata JSON` 兜底字段"方案，**不启用** `enable_dynamic_field=True`（避免 schema 污染，保持索引策略可控）
+- **索引参数**：`HNSW` 的 `M` / `efConstruction` / `metric_type` 从插件 config 读取，不写死
+
+### 12.2 Metadata 字段来源分工
+
+| 字段 | 来源层 | 说明 |
+|------|--------|------|
+| `agentId` | Host | Host 知道当前 agent 身份，不由插件猜测 |
+| `session_key` | Host/Manager | 会话标识，用于隔离同一 agent 的不同聊天窗口 |
+| `memory_type` | Manager | 默认写死 `"short_term"`，Task 16 短时→长时升级时改为 `"long_term"` / `"archived"` |
+| `createdAt` | Manager | 统一 UTC 毫秒数，抛弃本地时区依赖 |
+| `provenance.label` | Tool/Manager | 按 §12.3 溯源字典注入 |
+
+### 12.3 常量枚举与防呆
+
+在 `extensions/memory-milvus/src/types.ts` 强制导出两个常量：
+
+```ts
+export const MEMORY_SOURCE_LABELS = {
+  CHAT_EXTRACT: 'chat_extract',         // AI flush 时提取
+  USER_MANUAL: 'user_manual',           // 用户在 UI 上手动添加
+  RECALL_PROMOTION: 'recall_promotion', // Dreaming 升级产生
+  IMPORT: 'import',                     // 老数据迁移导入
+} as const;
+
+export const MEMORY_TYPES = {
+  SHORT_TERM: 'short_term',
+  LONG_TERM: 'long_term',
+  ARCHIVED: 'archived',
+} as const;
+```
+
+- **校验策略**：`memory_write` 工具执行前强校验 `provenance.label`，越界即抛错（label 由代码注入，越界即 bug，应早暴露）
+- `memory_type` 同样受枚举约束
+
+### 12.4 Timezone 字段去留
+
+- **决策**：底层 `MemoryEntry` 不存 timezone 字段，`createdAt` / `updatedAt` 统一 UTC 毫秒数
+- **UI 转换**：本地时间展示由前端按浏览器时区自行转换，或在更高层业务逻辑处理，不污染底层数据结构
+- 与 Task 8 Schema 一致（Task 8 本就未定义 timezone）
+
+### 12.5 写入兜底（方案 4B）
+
+- **兜底目录**：`memory/.milvus-fallback/YYYY-MM-DD.ndjson`（独立于 file backend 主目录，避免耦合）
+- **写入流程**：milvus 不可用时，整条 entry 序列化为 ndjson 追加
+- **回放时机**：每次 `write()` 调用前先探测 milvus 健康：
+  1. 健康 → 批量回放 fallback 目录待处理条目
+  2. 回放成功 → 从 ndjson 移除（或标记已处理）
+  3. 回放失败 → 保留条目等下次重试
+  4. 最后写新记录
+- **回放粒度**：按文件批处理，单条失败不影响其他条目
+
+### 12.6 Milvus Init 连不上的行为
+
+- **决策**：warn + 不阻止插件启用 + 写入自动走 §12.5 fallback
+- `MilvusSearchManager.status()` 上报 `degraded` 状态
+- 每次 `write()` 前尝试 reconnect（复用已有连接池/客户端）
+- 不采用"拒绝启用"方案，避免 milvus 短暂不可用时用户完全无法写记忆
+
+### 12.7 recordRecall 失败策略
+
+- **决策**：失败直接丢 + warn 日志，**不走 fallback**
+- 理由：召回埋点非关键数据，丢了只影响 Task 16 短时→长时升级信号密度，不会丢失用户记忆主体
+- 与 §12.5 写入兜底区别对待：写入必须零丢失，召回可容忍丢失
+- **过渡期（Task 10 完成到 Task 12/13 完工前）**：memory-milvus 插件标注为 `experimental` / `alpha` 状态，通过 manifest 与 README 明确说明 promotion 链路依赖后续任务完工。Alpha 期间 recordRecall 仅 warn，不做任何持久化；Task 13 完工时撤下标签并做端到端回归。
+
+### 12.8 测试策略
+
+- **单元测试（默认 CI）**：mock `@zilliz/milvus2-sdk-node` 的 client，覆盖 `MilvusSearchManager` 各方法的逻辑分支、metadata 组装、label/type 枚举校验、fallback 触发条件
+- **集成/Live 测试**：需真实 Milvus 实例的测试放在 `*.live.test.ts` 或通过 `OPENCLAW_LIVE_TEST=1` 开关运行，默认 CI 跳过
+- **不引入 milvus-lite**：embedded 方案复杂度过高，成本不匹配收益
+- **Fallback 测试**：在单测里 mock client 抛错模拟断连，验证 ndjson 写入与回放逻辑
+- 文件定位：`extensions/memory-milvus/src/*.test.ts` 与 `extensions/memory-milvus/src/*.live.test.ts`
+
+### 12.9 pi-tools 白名单归属（务实决策）
+
+- **现状**：`MEMORY_FLUSH_ALLOWED_TOOL_NAMES` 硬编码在 `src/agents/pi-tools.ts` L98，Task 10 会追加 `memory_write`
+- **决策**：暂时接受硬编码，不做架构下沉（manifest 注册 / 核心注册 API 等方案）
+- **理由**：
+  - memory 能力是核心通用能力，不是纯业务 owner 专属，白名单放核心可接受
+  - 架构下沉改动面涉及 plugin 系统基础设施，成本高、收益有限
+  - 当前只追加一个 `memory_write`，未来如果出现更多 memory 相关插件工具，再统一重构
+- **遗留事项**：记录为技术债，留待 Task 16 之后的架构统一阶段评估是否下沉
+

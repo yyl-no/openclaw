@@ -216,7 +216,7 @@ type MemoryFlushPlan = {
 | `created_at` | VarChar(32) | ISO 时间 |
 | `updated_at` | VarChar(32) | ISO 时间 |
 
-- embedding 模型：阿里云 text-embedding-v3（1024维）
+- embedding 模型：text-embedding-v3（1024维）
 - index 类型：IVF_FLAT 或 HNSW
 - agent 隔离：共享 Collection，`agent_id` 字段过滤
 
@@ -231,9 +231,76 @@ type MemoryFlushPlan = {
 
 ### Task 10: 重写写入 capture/flush 流程
 
-- `buildMilvusFlushPlan` 返回 `backendKind: "milvus"`
-- AI 提取记忆 → embed → insert Milvus
-- 写入走 plugin 的 `memory_write` 工具
+> 详细决策见 `2-decisions.md` §12。当下采用**路线 A 分阶段渐进**（双路径并存：文件后端继续 `write + wrap`，milvus 后端单独走 `memory_write`），Task 16 之后再合并到 §11 的统一目标（解读 B）。
+
+**10.1 Collection 生命周期（Eager init 原子化）**
+- 位置：`extensions/memory-milvus/src/search.ts` 或新文件 `collection-bootstrap.ts`
+- 实现 `create_collection` → `create_index` → `load_collection` 三步原子化
+- 幂等探测（describe / has_index）、重启检查 loaded 状态
+- HNSW 参数从 config 读（`M` / `efConstruction` / `metric_type`）
+- 固定 schema + `metadata JSON` 兜底字段（不启用 `enable_dynamic_field`）
+- **验收**：插件二次启动不报"already exists"、Collection 处于 loaded、search/write 可用
+
+**10.2 常量枚举与类型补齐**
+- 在 `extensions/memory-milvus/src/types.ts` 导出 `MEMORY_SOURCE_LABELS` 与 `MEMORY_TYPES`（见 §12.3）
+- 校验辅助函数：`assertValidSourceLabel(label)` / `assertValidMemoryType(t)`
+- **验收**：types.ts 单元测试覆盖越界抛错
+
+**10.3 `MilvusSearchManager.write(entry)` 实现**
+- 位置：`extensions/memory-milvus/src/search.ts`
+- 组装 metadata（agentId / session_key / memory_type=short_term / createdAt=UTC ms / provenance.label）
+- 调 `EmbeddingProvider` 生成向量 → `collection.insert`
+- 返回 `MemoryReference`（含 milvus PK）
+- 失败（embed / insert）走 §10.4 fallback
+- **验收**：能写入 milvus 并 search 命中
+
+**10.4 Fallback 目录与回放**
+- 位置：`extensions/memory-milvus/src/fallback.ts`（新建）
+- 路径 `memory/.milvus-fallback/YYYY-MM-DD.ndjson`
+- `writeFallback(entry)` / `replayFallback()`
+- `write()` 入口先探 milvus 健康 → 健康则先回放再写新；不健康则直接 fallback
+- Init 连不上时 `status()` 返回 `degraded`，不阻止插件启用
+- **验收**：断 milvus 连接写入不丢数据，恢复后自动回灌
+
+**10.5 `memory_write` 工具注册（仅 milvus 插件）**
+- 位置：`extensions/memory-milvus/src/tools.ts` 或 `index.ts` 内联注册
+- Schema：`{ text: string, label?: MemorySourceLabel }`（label 默认 `chat_extract`）
+- Tool handler 调 `activeManager.write(entry)`
+- 强校验 `label` 在 `MEMORY_SOURCE_LABELS` 内，越界抛错
+- **验收**：AI 调 `memory_write` → milvus 写入成功；越界 label 返回错误
+
+**10.6 pi-tools 白名单追加 `memory_write`**
+- 位置：`src/agents/pi-tools.ts` L98 `MEMORY_FLUSH_ALLOWED_TOOL_NAMES`
+- 改为 `new Set(["read", "write", "memory_write"])`
+- 不动 wrap 装饰逻辑（write 继续走 wrap，memory_write 不包装）
+- **验收**：flush turn milvus 后端下 AI 能调到 `memory_write`；文件后端行为不变
+
+**10.7 `buildMilvusFlushPlan` prompt 对齐**
+- 位置：`extensions/memory-milvus/index.ts` L60-71
+- 确认 prompt 引导 AI 调 `memory_write(text)`，不是 `write({path, content})`
+- 复用 `extensions/memory-core/src/flush-plan.ts` 的通用 hint 文案（如 `MEMORY_FLUSH_TARGET_HINT` 等）
+- **验收**：real-run 下 AI 按 prompt 选中 `memory_write` 工具
+
+**10.8 recordRecall 失败兜底**
+- 召回埋点失败直接丢 + warn log（不走 fallback）
+- Task 12 正式实现 milvus 的 `recordRecall` 时合并此策略
+
+**10.9 Alpha / Experimental 标记**
+- 位置：`extensions/memory-milvus/package.json` + README
+- `package.json` 加标识字段（如 `"stability": "experimental"` 或等价 manifest 字段）
+- README 明确"Alpha 状态：promotion 链路依赖 Task 12/13 完工，当前仅支持写入和检索"
+- Task 13 完工时移除此标记（见 Task 13 验收）
+
+**10.10 测试策略（对应 §12.8）**
+- 单测文件 `extensions/memory-milvus/src/*.test.ts`：mock `@zilliz/milvus2-sdk-node` client，覆盖 write/fallback/枚举校验
+- Live 测试文件 `extensions/memory-milvus/src/*.live.test.ts`：`OPENCLAW_LIVE_TEST=1` 下跑，需真实 Milvus
+- 不引入 milvus-lite
+
+**不在 Task 10 范围**：
+- Task 12 的 `recordRecall` milvus 实现
+- Task 16 的统一 `memory_write`（合并到解读 B）
+- 文件后端改走 `memory_write`（等 Task 16）
+- pi-tools 白名单下沉（见 §12.9，留技术债）
 
 ### Task 11: 重写 memory_search / memory_get / memory_recall
 
@@ -253,6 +320,7 @@ type MemoryFlushPlan = {
 - REM dreaming：会话语料摄入
 - Deep dreaming：筛选高 recall_count → LLM 合并总结 → 更新 `memory_type="long_term"`
 - Cron 触发机制复用
+- **完工条件**：撤下 Task 10.9 的 `experimental` / `alpha` 标记 + 做一次端到端回归（写入→召回→promotion→long_term 升级全链路通）
 
 ### Task 14: Markdown → Milvus 迁移工具（延后）
 
@@ -300,3 +368,152 @@ type MemoryFlushPlan = {
 任务15: 接入 slot
 任务16: 去重/隔离/版本
 ```
+
+---
+
+## Task 10 执行步骤总表（聚合版）
+
+> 基于 `2-decisions.md` §12 全部决策与 Task 10 的 10.1–10.10 拆分，聚合为**单线串行**的 7 步执行清单。按 S1 → S7 顺序推进，每步独立 commit 与验收，禁止跳步或并行。
+
+### S1. 类型契约与常量枚举打底
+
+**依据**：§12.3 / §12.2 / 10.2
+
+**做什么**：
+1. 在 `extensions/memory-milvus/src/types.ts` 导出常量：
+   - `MEMORY_SOURCE_LABELS`（`chat_extract` / `user_manual` / `recall_promotion` / `import`）
+   - `MEMORY_TYPES`（`short_term` / `long_term` / `archived`）
+2. 从常量派生类型别名：`MemorySourceLabel` / `MemoryType`
+3. 新增校验函数：`assertValidSourceLabel(label)` / `assertValidMemoryType(t)`，越界立即抛错
+4. 补充 `MilvusMemoryEntryMetadata` 类型（`agentId` / `session_key` / `memory_type` / `createdAt: number` / `provenance: { label: MemorySourceLabel }`）
+
+**验收**：types.ts 单测覆盖枚举值和越界抛错；`pnpm build` 通过。
+
+### S2. Collection 初始化基础设施（含 init 接入 + degraded 状态）
+
+**依据**：§12.1 / §12.6 / 10.1
+
+**做什么**：
+1. 新建 `extensions/memory-milvus/src/collection-bootstrap.ts`，实现 `ensureCollectionReady(client, config)`：
+   - `describe_collection` 探测 → 不存在则 `create_collection`（Task 8 schema + `metadata JSON` 兜底字段，不启用 `enable_dynamic_field`）
+   - `has_index` 探测 → 不存在则 `create_index`（HNSW，`M` / `efConstruction` / `metric_type` 从 config 读）
+   - `get_load_state` 探测 → 未加载则 `load_collection`
+   - 每步幂等，"已存在"不视作错误
+2. 在 `extensions/memory-milvus/index.ts` 的 `init` hook 里调用 `ensureCollectionReady`：
+   - 成功 → `activeManager` 正常实例化
+   - 失败（连不上等）→ warn 日志 + 仍实例化 `activeManager`，内部标记 `degraded = true`，**不** 抛错阻止启用
+3. `MilvusSearchManager.status()` 返回值新增 `degraded` 字段（供上层/UI 感知）
+
+**验收**：mock client 单测覆盖"全新创建 / 已存在 / 部分存在"三种 bootstrap 场景；"连通成功 init ok" / "连不上 init 不抛 + status degraded" 两种 init 场景。
+
+### S3. Fallback 基础设施
+
+**依据**：§12.5 / 10.4
+
+**做什么**：
+1. 新建 `extensions/memory-milvus/src/fallback.ts`
+2. 常量：`FALLBACK_DIR = "memory/.milvus-fallback"`、文件命名 `YYYY-MM-DD.ndjson`
+3. 实现 `writeFallback(entry)`：序列化 entry 为 JSON 追加到当日 ndjson，带行级文件锁
+4. 实现 `replayFallback(writer)`：遍历目录待处理文件，逐条 `writer(entry)` 回放；成功条目移除或标记，失败保留
+5. 实现 `pendingFallbackCount()`：供 `status()` 上报
+
+**验收**：单测覆盖"写入 → 回放成功 → 文件清空"与"写入 → 回放部分失败 → 失败条目保留"两条路径。
+
+### S4. MilvusSearchManager.write 核心实现（含 recordRecall 占位）
+
+**依据**：§12.2 / §12.5 / §12.7 / 10.3 / 10.8（**核心步骤，单个 commit 最大**）
+
+**做什么**（严格按顺序）：
+1. 在 `extensions/memory-milvus/src/search.ts::MilvusSearchManager` 新增 `write(entry): Promise<MemoryReference>`
+2. 入口组装 metadata：
+   - `agentId`：从构造参数读（Host 注入）
+   - `session_key`：从参数读；默认值待 Host 明确，暂留 TODO
+   - `memory_type`：写死 `"short_term"`
+   - `createdAt`：`Date.now()` UTC 毫秒
+   - `provenance.label`：从调用方传入（默认由 tool 注入 `chat_extract`）
+   - 调 `assertValidSourceLabel` / `assertValidMemoryType` 校验
+3. 写入流程：
+   - 探测 milvus 健康（`ping` 或轻量 `describe_collection`）
+   - 健康 → 先 `replayFallback()` 批量回灌，再执行新写入
+   - 新写入：`EmbeddingProvider.embed(text)` → `collection.insert`
+   - 返回 `MemoryReference`（id 用 Milvus PK，字符串化）
+4. 失败兜底：
+   - embed 失败 / insert 失败 / 健康探测失败 → `writeFallback(entry)` + warn + 返回占位 `MemoryReference`（id 带 `fallback:` 前缀）
+5. 同文件新增 `recordRecall(refs, context?)` 占位：
+   - 实现仅为 `logger.warn("[memory-milvus] recordRecall not yet implemented (Task 12)")` + return
+   - 方法上方加 `// TODO(Task 12): replace with real milvus recall_count update`
+   - 不做任何持久化
+
+**验收**：单测覆盖 write 四条路径（成功 / embed 失败 / insert 失败 / degraded 直 fallback）+ recordRecall 调用不抛错且仅 warn。
+
+### S5. AI 调用链端到端打通（memory_write 工具 + 白名单 + prompt）
+
+**依据**：10.5 / 10.6 / 10.7 / §12.3 / §12.9（跨包三件套，缺一不可）
+
+**做什么**：
+1. **工具注册**（`extensions/memory-milvus/src/tools.ts` 或内联 `index.ts`）：
+   - 注册 `memory_write`，schema `{ text: string, label?: MemorySourceLabel }`
+   - label 默认 `MEMORY_SOURCE_LABELS.CHAT_EXTRACT`
+   - handler：`assertValidSourceLabel(label)` → `activeManager.write({ text, provenance: { label } })`
+   - 仅在 milvus 后端激活时注册（通过现有 backend kind 判断）
+2. **核心白名单**（`src/agents/pi-tools.ts` L98）：
+   - 改为 `const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write", "memory_write"]);`
+   - **不动** `wrapToolMemoryFlushAppendOnlyWrite` 装饰逻辑（`write` 仍走 wrap，`memory_write` 不包装）
+3. **prompt 对齐验证**（`extensions/memory-milvus/index.ts::buildMilvusFlushPlan` L60-71）：
+   - 确认 prompt 明确引导 AI 调 `memory_write(text)`，**不**引导调 `write({path, content})`
+   - 如不一致，复用 `extensions/memory-core/src/flush-plan.ts` 的通用 hint 构造
+   - 确保 `MemoryFlushPlan.backendKind === "milvus"`
+
+**验收**：
+- 工具单测：合法 label 写入成功 / 非法 label 抛错 / 非 milvus 后端不注册
+- pi-tools：`pnpm check:changed` 通过；grep 确认 wrap 逻辑未被误改；文件后端 flush 行为零回归
+- prompt snapshot 断言：包含 `memory_write` 字样，不含 `write(` / `path` 关键词
+
+### S6. Alpha 标记 + 测试整合
+
+**依据**：10.9 / §12.7 / §12.8 / 10.10
+
+**做什么**：
+1. **Alpha 标记**：
+   - `extensions/memory-milvus/package.json` 加字段 `"stability": "experimental"`（或 OpenClaw manifest 对应字段）
+   - 新增/更新 `extensions/memory-milvus/README.md`：
+     - 明确标注"Alpha 状态"
+     - 说明"promotion 链路依赖 Task 12 / 13 完工"
+     - 列出当前支持 / 不支持的能力
+   - 引用 plan.md Task 13 完工条件（撤标签）
+2. **Live 测试骨架**：
+   - 新建 `extensions/memory-milvus/src/*.live.test.ts`，至少覆盖 write → search 端到端一条用例
+   - 用 `describe.skipIf(!process.env.OPENCLAW_LIVE_TEST)` 保护
+   - README 说明本地启 Milvus 的方式
+   - **不引入** milvus-lite 或其他 embedded 方案
+3. **Mock 单测收口**：S1–S5 产出的所有 `*.test.ts` 能被 `pnpm test extensions/memory-milvus` 一把跑绿
+
+**验收**：默认 CI 跳过 live 测试；`OPENCLAW_LIVE_TEST=1 pnpm test:live extensions/memory-milvus` 本地连通 Milvus 时全绿；package.json stability 字段可被插件 loader 读取。
+
+### S7. 构建 / 验收 / 进度同步收尾
+
+**依据**：常规验收 + AGENTS.md
+
+**做什么**：
+1. `pnpm build` 全绿
+2. `pnpm test extensions/memory-milvus` 全绿
+3. `pnpm check:changed` 全绿（lint / format / type）
+4. 在 `refactor/0-progress.md` 末尾**追加** Task 10 完成记录（遵循项目文档约定，进度只写入 0-progress.md）
+5. 记录内容：完成日期、S1–S6 对应改动文件清单、验收证据（测试数字）、遗留技术债（pi-tools 白名单归属 / `recordRecall` 占位 / `session_key` 默认值 TODO 等）
+
+**验收**：三绿 + 进度文档更新。
+
+### 关键不变式（贯穿 S1–S7）
+
+- ✅ 文件后端零回归（S5 只追加白名单，不动 wrap 装饰）
+- ✅ Milvus 不可用时写入不丢（S3 fallback 基础设施 + S4 写入兜底链路）
+- ✅ Label / Type 越界即抛错（S1 校验函数 + S4/S5 入口复用）
+- ✅ 插件标为 Alpha（S6），Task 13 完工时撤标签
+
+### 不在 Task 10 范围（明确排除）
+
+- Task 11：`memory_search` / `memory_get` / `memory_recall` 工具重写
+- Task 12：`recordRecall` 正式实现（milvus 字段更新）
+- Task 13：Dreaming promotion + 撤 Alpha 标签
+- Task 16：sha256 去重、update / delete / 版本、citation
+- 架构统一：pi-tools 白名单下沉、文件后端改走 `memory_write`
