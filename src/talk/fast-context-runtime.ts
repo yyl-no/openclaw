@@ -129,11 +129,11 @@ async function lookupFastContext(params: {
       error: memory.error ?? "no active memory manager",
     };
   }
-  const hits = await memory.manager.search(params.query, {
+  const hits = (await memory.manager.search(params.query, {
     maxResults: params.config.maxResults,
     sessionKey: params.sessionKey,
     sources: params.config.sources,
-  });
+  })) as MemorySearchHit[];
   return { status: "hits", hits };
 }
 

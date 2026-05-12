@@ -127,7 +127,7 @@ export interface MemorySearchManager {
       onDebug?: (debug: MemorySearchRuntimeDebug) => void;
       sources?: MemorySource[];
     },
-  ): Promise<MemorySearchResult[]>;
+  ): Promise<MemorySearchResult[] | MemoryReference[]>;
   readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult>;
   status(): MemoryProviderStatus;
   sync?(params?: {

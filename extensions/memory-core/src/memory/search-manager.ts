@@ -12,7 +12,9 @@ import { checkQmdBinaryAvailability } from "openclaw/plugin-sdk/memory-core-host
 import {
   resolveMemoryBackendConfig,
   type MemoryEmbeddingProbeResult,
+  type MemoryReference,
   type MemorySearchManager,
+  type MemorySearchResult,
   type MemorySearchRuntimeDebug,
   type MemorySource,
   type MemorySyncProgressUpdate,
@@ -106,6 +108,21 @@ export type MemorySearchManagerResult = {
   manager: Maybe<MemorySearchManager>;
   error?: string;
 };
+
+function toMemoryReference(result: MemorySearchResult): MemoryReference {
+  return {
+    id: `file:${result.path}:${result.startLine}:${result.endLine}`,
+    snippet: result.snippet,
+    score: result.score,
+    vectorScore: result.vectorScore,
+    textScore: result.textScore,
+    source: result.source,
+    provenance: {
+      kind: "file",
+      label: `${result.path} L${result.startLine}-${result.endLine}`,
+    },
+  };
+}
 
 export type MemorySearchManagerPurpose = "default" | "status" | "cli";
 

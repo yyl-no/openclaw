@@ -302,7 +302,7 @@ export function createMemorySearchTool(options: {
                 : requestedCorpus === "memory"
                   ? (["memory"] as MemorySource[])
                   : undefined;
-            rawResults = await memory.manager.search(query, {
+            rawResults = (await memory.manager.search(query, {
               maxResults,
               minScore,
               sessionKey: options.agentSessionKey,
@@ -311,7 +311,7 @@ export function createMemorySearchTool(options: {
                 runtimeDebug.push(debug);
               },
               ...(searchSources ? { sources: searchSources } : {}),
-            });
+            })) as MemoryReference[];
             rawResults = (await filterMemorySearchHitsBySessionVisibility({
               cfg,
               requesterSessionKey: options.agentSessionKey,

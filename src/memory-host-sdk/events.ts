@@ -11,9 +11,10 @@ export type MemoryHostRecallRecordedEvent = {
   query: string;
   resultCount: number;
   results: Array<{
-    path: string;
-    startLine: number;
-    endLine: number;
+    id?: string;
+    path?: string;
+    startLine?: number;
+    endLine?: number;
     score: number;
   }>;
 };

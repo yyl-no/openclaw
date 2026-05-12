@@ -2,7 +2,7 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { MemoryEmbeddingProbeResult } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import type { MemoryEmbeddingProbeResult, MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { resolveMemoryRemDreamingConfig } from "openclaw/plugin-sdk/memory-core-host-status";
 import { buildAgentSessionKey } from "openclaw/plugin-sdk/routing";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
@@ -1210,7 +1210,7 @@ export async function runMemorySearch(
       void recordShortTermRecalls({
         workspaceDir,
         query,
-        results,
+        results: results as MemoryReference[],
         timezone: dreaming.timezone,
       }).catch(() => {
         // Recall tracking is best-effort and must not block normal search results.
@@ -1230,7 +1230,7 @@ export async function runMemorySearch(
           `${colorize(rich, theme.success, result.score.toFixed(3))} ${colorize(
             rich,
             theme.accent,
-            `${shortenHomePath(result.path)}:${result.startLine}-${result.endLine}`,
+            `${shortenHomePath("provenance" in result ? result.provenance.label : result.path)}:${"startLine" in result ? `${result.startLine}-${result.endLine}` : ""}`,
           )}`,
         );
         lines.push(colorize(rich, theme.muted, result.snippet));

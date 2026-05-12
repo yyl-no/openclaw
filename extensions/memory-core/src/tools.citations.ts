@@ -52,7 +52,7 @@ export function clampResultsByInjectedChars<T extends { snippet?: string }>(
     return results;
   }
   let remaining = budget;
-  const clamped: MemorySearchResult[] = [];
+  const clamped: T[] = [];
   for (const entry of results) {
     if (remaining <= 0) {
       break;

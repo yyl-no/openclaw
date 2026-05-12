@@ -197,6 +197,39 @@
 
 ---
 
+### TS2322 类型错误清理 ✅ 完成
+
+**日期**：2026-05-12
+
+**背景**：Part 1 全部 Task 1~6 + H-A 完成后，tsgo 仍残留 9 个 TS2322 错误，均涉及 `MemorySearchResult[]` 与 `MemoryReference[]` 类型不兼容。同时 `MemoryIndexManager` 在 `implements MemoryDataBackend` 后（`search()` → `MemoryReference[]`）无法赋值给旧接口 `MemorySearchManager`（`search()` → `MemorySearchResult[]`），导致 `search-manager.ts` 中两处 TS2322。
+
+**核心修复**：
+
+1. **`packages/memory-host-sdk/src/host/types.ts`** — 拓宽 `MemorySearchManager.search()` 返回类型，从 `Promise<MemorySearchResult[]>` 改为 `Promise<MemorySearchResult[] | MemoryReference[]>`。这使得 `MemoryIndexManager`（`search() → MemoryReference[]`）与 `MemorySearchManager` 结构兼容，同时兼容各调用方返回的 `MemorySearchResult[]`。
+
+2. **`extensions/memory-core/src/memory/search-manager.ts`** — 添加 `toMemoryReference()` 辅助函数，将 `MemorySearchResult` 转为 `MemoryReference`（`id = file:path:startLine:endLine`，`provenance = { kind: "file", ... }`）。
+
+3. **调用方适配**（6 个文件）：
+   - `tools.ts` — `manager.search()` 结果加 `as MemoryReference[]`
+   - `cli.runtime.ts` — 加 `as MemoryReference[]`，`result.path/startLine/endLine` 改为 `"provenance" in result` 类型守卫兼容两类型
+   - `tools.citations.ts` — 泛型约束 `MemorySearchResult[]` → `T[]`
+   - `dreaming-phases.ts` — 3 处加 `as unknown as MemoryReference[]`，`ShortTermRecallEntry` 旧字段 `path/startLine/endLine` → `key`
+   - `memory-wiki/src/query.ts` — 加 `as MemorySearchResult[]`
+   - `fast-context-runtime.ts` — 加 `as MemorySearchHit[]`
+
+4. **`src/memory-host-sdk/events.ts`** — `MemoryHostRecallRecordedEvent.results` 元素改为 `id?/path?/startLine?/endLine?`（全部 optional），消除 `short-term-promotion.ts` 的 TS2322。
+
+5. **dist 声明文件重建**：tsdown 完整构建在 Windows 上 OOM，改用 `npx tsc --project tsconfig.plugin-sdk.dts.json` 直接生成 dist 声明。
+
+**最终状态**：
+- ✅ TS2322：**零错误**（原有 9 个 + 修复过程中新暴露的 2 个全部消除）
+- ⚠️ TS2353（~20 个）：test 文件中的测试 fixture 仍使用旧 `path` 字段，不阻塞 Task 7（设计确认），可在 Task 9（回归测试）前清理
+- ⚠️ TS2339/TS2305（少量）：预存错误，非本次引入
+
+**改动文件**：11 个（核心 6 个调用方 + search-manager + types + events + dist 声明 + 2 个外部调用方）
+
+---
+
 ## 第二部分：memory-milvus 实现
 
 尚未开始。

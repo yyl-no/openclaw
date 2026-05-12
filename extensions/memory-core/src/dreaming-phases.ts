@@ -1046,7 +1046,7 @@ async function ingestSessionTranscriptSignals(params: {
     await recordShortTermRecalls({
       workspaceDir: params.workspaceDir,
       query: `__dreaming_sessions__:${batch.day}`,
-      results: batch.results,
+      results: batch.results as unknown as MemoryReference[],
       signalType: "daily",
       dedupeByQueryPerDay: true,
       dayBucket: ingestionDayBucket,
@@ -1218,7 +1218,7 @@ async function ingestDailyMemorySignals(params: {
     await recordShortTermRecalls({
       workspaceDir: params.workspaceDir,
       query: `__dreaming_daily__:${batch.day}`,
-      results: batch.results,
+      results: batch.results as unknown as MemoryReference[],
       signalType: "daily",
       dedupeByQueryPerDay: true,
       dayBucket: ingestionDayBucket,
@@ -1323,7 +1323,7 @@ export async function seedHistoricalDailyMemorySignals(params: {
     await recordShortTermRecalls({
       workspaceDir: params.workspaceDir,
       query: `__dreaming_daily__:${entry.day}`,
-      results,
+      results: results as unknown as MemoryReference[],
       signalType: "daily",
       dedupeByQueryPerDay: true,
       dayBucket: formatMemoryDreamingDay(params.nowMs, params.timezone),
@@ -1382,7 +1382,7 @@ function dedupeEntries(entries: ShortTermRecallEntry[], threshold: number): Shor
   for (const entry of entries) {
     const duplicate = deduped.find(
       (candidate) =>
-        candidate.path === entry.path &&
+        candidate.key === entry.key &&
         jaccardSimilarity(candidate.snippet, entry.snippet) >= threshold,
     );
     if (duplicate) {
@@ -1416,7 +1416,7 @@ function buildLightDreamingBody(entries: ShortTermRecallEntry[]): string[] {
     const snippet = entry.snippet || "(no snippet captured)";
     lines.push(`- Candidate: ${snippet}`);
     lines.push(`  - confidence: ${entryAverageScore(entry).toFixed(2)}`);
-    lines.push(`  - evidence: ${entry.path}:${entry.startLine}-${entry.endLine}`);
+    lines.push(`  - evidence: ${entry.key}`);
     lines.push(`  - recalls: ${entry.recallCount}`);
     lines.push(`  - status: staged`);
   }
@@ -1469,7 +1469,7 @@ function selectRemCandidateTruths(
       key: entry.key,
       snippet: entry.snippet || "(no snippet captured)",
       confidence: calculateCandidateTruthConfidence(entry),
-      evidence: `${entry.path}:${entry.startLine}-${entry.endLine}`,
+      evidence: entry.key,
     }))
     .filter((entry) => entry.confidence >= 0.45)
     .toSorted((a, b) => b.confidence - a.confidence || a.snippet.localeCompare(b.snippet))
@@ -1489,7 +1489,7 @@ function buildRemReflections(
       }
       const stat = tagStats.get(tag) ?? { count: 0, evidence: new Set<string>() };
       stat.count += 1;
-      stat.evidence.add(`${entry.path}:${entry.startLine}-${entry.endLine}`);
+      stat.evidence.add(entry.key);
       tagStats.set(tag, stat);
     }
   }

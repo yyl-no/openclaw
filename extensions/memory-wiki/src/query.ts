@@ -1407,9 +1407,9 @@ export async function searchMemoryWiki(params: {
         agentSessionKey: params.agentSessionKey,
       })
     : null;
-  let rawMemoryResults = sharedMemoryManager
+  let rawMemoryResults = (sharedMemoryManager
     ? await sharedMemoryManager.search(params.query, { maxResults })
-    : [];
+    : []) as MemorySearchResult[];
   if (
     params.appConfig &&
     shouldEnforceSessionVisibility(params) &&
