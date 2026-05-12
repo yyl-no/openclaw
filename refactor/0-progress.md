@@ -146,25 +146,34 @@
 
 **详细计划**：见 `1-plan.md` §方案 H 执行计划。
 
-**执行状态**：
+**执行记录**（逐条累积，按时间顺序）：
 
-> **顺序调整说明**（2026-05-12）：原计划 A1→A2→A3→A4，实际执行中发现 A2 的 `recordRecall` 需要新签名 `(refs, context?)`，但接口 `MemoryDataBackend` 仍是旧签名 `(ids: string[])`，导致 A2 实现编译报错 TS2416。因此将 A4（接口签名）前置到 A2 修正之前：**A1 → A4 → A2修正 → A3**。
-
-- ✅ A1：抽取 `appendMemoryFileSafe` 公共原语 + 导出 `formatDateStampInTimezone`（2026-05-12）
+- ✅ **A1**（2026-05-12）：抽取 `appendMemoryFileSafe` 公共原语 + 导出 `formatDateStampInTimezone`
   - 新文件：`extensions/memory-core/src/memory/memory-append-safe.ts`（204 行）
   - 修改：`extensions/memory-core/src/flush-plan.ts`（`formatDateStampInTimezone` 改 export）
   - 导出：`appendMemoryFileSafe()`、`resolveDailyMemoryRelativePath()`、`RESERVED_MEMORY_FILES`
   - 特性：路径白名单（`memory/YYYY-MM-DD.md`）、保留文件拒写、per-path 并发锁、append-only、返回 1-based 行号区间
   - 类型：`tsgo` 验证无新增错误
-- ⚠️ A2：已实现但需修正（2026-05-12）
-  - `write(entry)` ✅ 正确：调 `resolveDailyMemoryRelativePath` + `appendMemoryFileSafe`，`dirty = true`，返回 `MemoryReference`
-  - `promote(ids)` ✅ 正确：解析 ID → `rankShortTermPromotionCandidates` → 过滤匹配 → `applyShortTermPromotions`
-  - `recordRecall(ids)` ❌ 签名不对：当前用旧签名 `(ids: string[])`，内部做 ID 反解析+读文件，query 回退为 `refs[0]!.id`
-  - **待修正**：改为 `recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string })`，变为纯薄封装 `recordShortTermRecalls`，删去 ID 解析/readFile 冗余逻辑
-- ✅ A4：接口签名扩展落地（2026-05-12，前置执行）
+
+- ✅ **A2**（2026-05-12，初版）：实现 `manager.write/recordRecall/promote` 三方法
+  - `write(entry)`：调 `resolveDailyMemoryRelativePath` + `appendMemoryFileSafe`，`dirty = true`，返回 `MemoryReference`
+  - `recordRecall(ids: string[])`：用旧签名，内部做 `file:path:start:end` ID 解析 → `readFile` 读取 snippet → 构造 refs → 调 `recordShortTermRecalls`（query 回退为 `refs[0]!.id`）
+  - `promote(ids)`：解析 ID → `rankShortTermPromotionCandidates` → 过滤匹配 → `applyShortTermPromotions`
+
+- ⚠️ **发现问题**（2026-05-12）：验证发现 `recordRecall(ids: string[])` 与计划预期不符。计划要求 `recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string })`——薄封装而非 ID 反解析。且接口未改、实现无法编译新签名（报 TS2416）。
+
+- 🔧 **决策**（2026-05-12）：将 A4（接口签名）前置到 A2 修正之前。执行顺序调整为：A1 → A4 → A2修正 → A3。
+
+- ✅ **A4**（2026-05-12）：接口签名扩展落地
   - `packages/memory-host-sdk/src/host/types.ts`：`recordRecall(ids: string[])` → `recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string })`
-  - 预期 manager.ts 报 TS2416 — 待 A2 修正消除
-- ⏳ A3：调用方收敛（`tools.ts::queueShortTermRecallTracking`、`dreaming.ts::L601`）
+
+- ✅ **A2 修正**（2026-05-12）：`recordRecall` 换新签名 + 删冗余
+  - 签名改为 `(refs: MemoryReference[], context?: { query: string; timezone?: string })`
+  - 变成纯薄封装 `recordShortTermRecalls`（fire-and-forget），query 优先使用 `context.query`，timezone 透传
+  - 删去 ID 解析/readFile 冗余逻辑（-33行）
+  - 类型：TS2416 消除
+
+- ⏳ **A3**：调用方收敛（`tools.ts::queueShortTermRecallTracking` → `manager.recordRecall(refs)`、`dreaming.ts::L601` → `manager.promote(ids)`）
 
 
 ---

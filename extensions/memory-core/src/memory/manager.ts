@@ -816,43 +816,16 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     };
   }
 
-  async recordRecall(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-
-    const refs: MemoryReference[] = [];
-    for (const id of ids) {
-      try {
-        if (!id.startsWith("file:")) continue;
-        const parsed = id.slice("file:".length);
-        const lastColon1 = parsed.lastIndexOf(":");
-        const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
-        if (lastColon2 < 0) continue;
-        const relPath = parsed.slice(0, lastColon2);
-        const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
-        const endLine = Number(parsed.slice(lastColon1 + 1));
-        if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) continue;
-        const lines = endLine - startLine + 1;
-        if (lines < 1) continue;
-        const file = await this.readFile({ relPath, from: startLine, lines });
-        const snippet = file.text.slice(0, SNIPPET_MAX_CHARS);
-        if (!snippet.trim()) continue;
-        refs.push({
-          id,
-          snippet,
-          score: 1,
-          provenance: { kind: "file", label: `${relPath} L${startLine}-${endLine}` },
-        });
-      } catch {
-        // Skip unresolvable ids; recall tracking is best-effort.
-      }
-    }
-
+  async recordRecall(
+    refs: MemoryReference[],
+    context?: { query: string; timezone?: string },
+  ): Promise<void> {
     if (refs.length === 0) return;
-
     void recordShortTermRecalls({
       workspaceDir: this.workspaceDir,
-      query: refs[0]!.id,
+      query: context?.query?.trim() || refs[0]!.id,
       results: refs,
+      timezone: context?.timezone,
     }).catch(() => {
       // Recall tracking is best-effort and must never throw.
     });
