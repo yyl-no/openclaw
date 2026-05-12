@@ -223,13 +223,23 @@ function applyMMR(
 export class MilvusSearchManager {
   private closed = false;
 
+  /**
+   * Whether the manager is operating in degraded mode (Milvus unreachable
+   * during init).  In degraded mode writes go through the fallback path
+   * and search/read operations may return empty results.
+   */
+  public readonly degraded: boolean;
+
   constructor(
     private readonly client: MilvusClient,
     private readonly collectionName: string,
     private readonly provider: MemoryEmbeddingProvider,
     private readonly agentId: string,
     private readonly cfg: MilvusSearchConfig,
-  ) {}
+    opts?: { degraded?: boolean },
+  ) {
+    this.degraded = opts?.degraded ?? false;
+  }
 
   // ── 主搜索 ────────────────────────────────────────────────────
 
@@ -474,6 +484,7 @@ export class MilvusSearchManager {
         milvusPort: this.cfg.port,
         collectionName: this.collectionName,
         collectionClosed: this.closed,
+        degraded: this.degraded,
       },
     };
   }

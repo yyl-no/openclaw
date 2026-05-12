@@ -358,3 +358,30 @@
 | `createdAt` | Manager UTC 毫秒数 | `number` |
 | `provenance.label` | Tool/Manager 注入 | `MemorySourceLabel` |
 
+---
+
+### Task 10-S2: Collection 初始化基础设施（含 init 接入 + degraded 状态）✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task10-S2 + `2-decisions.md` §12.1/12.6
+
+**改动文件**：
+
+| 文件 | 改动 |
+|------|------|
+| `extensions/memory-milvus/src/collection-bootstrap.ts`（新建，254行） | `ensureCollectionReady(client, config)` — eager init 原子化三步（create_collection → create_index → load_collection），每步幂等。Schema 字段 13 个（12业务字段 + metadata JSON兜底），`enable_dynamic_field: false`。HNSW 参数 `M`/`efConstruction`/`metric_type` 从 config 读取 |
+| `extensions/memory-milvus/src/search.ts`（修改） | `MilvusSearchManager` 构造函数新增 `opts?: { degraded?: boolean }`，`status()` 的 `custom` 输出加 `degraded` 字段 |
+| `extensions/memory-milvus/index.ts`（修改） | `getMemorySearchManager` 中接入 `ensureCollectionReady`：成功 → 正常实例化；失败 → `console.warn` + `degraded=true`，不阻止插件启用 |
+| `extensions/memory-milvus/src/collection-bootstrap.test.ts`（新建，212行） | 8 个单测用例：覆盖全新创建 / 已存在全跳过 / 部分存在 / create失败抛出 / HNSW参数透传 / 网络错误上抛 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 2 files, 36 tests passed（types 28 + bootstrap 8）
+- `pnpm build` → 全绿
+- `pnpm tsgo:extensions` → memory-milvus 零错误（预存 memory-core 错误非本次引入）
+
+**degraded 行为契约**（`2-decisions.md` §12.6）：
+- Milvus 连不上时 `ensureCollectionReady` 抛出 → `index.ts` 捕获 → warn + `degraded=true` → 仍实例化 manager
+- `MilvusSearchManager.status().custom.degraded` 上报供上层/UI 感知
+- 后续 S3/S4 的 fallback/write 路径会先检查 `degraded` 决定是否走 ndjson 兜底
+

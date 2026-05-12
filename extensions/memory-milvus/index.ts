@@ -27,6 +27,7 @@ import {
   createMilvusClient,
   type MilvusSearchConfig,
 } from "./src/search.js";
+import { ensureCollectionReady } from "./src/collection-bootstrap.js";
 
 // ── Prompt Builder ─────────────────────────────────────────────────
 
@@ -146,6 +147,8 @@ const milvusRuntime: MemoryPluginRuntime = {
   async getMemorySearchManager(params) {
     const { cfg, agentId } = params;
 
+    let degraded = false;
+
     try {
       // 读取插件配置
       const rawConfig = readPluginConfig(cfg);
@@ -161,6 +164,21 @@ const milvusRuntime: MemoryPluginRuntime = {
 
       // 创建 Milvus 客户端
       const client = createMilvusClient(searchCfg.host, searchCfg.port);
+
+      // Eager init: 确保 Collection 就绪
+      try {
+        await ensureCollectionReady(client, {
+          collectionName: searchCfg.collectionName,
+          embeddingDim: searchCfg.embedding.dimensions ?? 1024,
+        });
+      } catch (bootstrapErr) {
+        // 连不上 / collection 创建失败 → warn + degraded，不阻止插件启用
+        console.warn(
+          "[memory-milvus] Collection bootstrap failed, operating in degraded mode:",
+          (bootstrapErr as Error).message ?? bootstrapErr,
+        );
+        degraded = true;
+      }
 
       // 创建 Embedding Provider
       const provider = await createEmbeddingProvider(
@@ -178,6 +196,7 @@ const milvusRuntime: MemoryPluginRuntime = {
         provider,
         agentId,
         searchCfg,
+        { degraded },
       );
 
       // 持有引用用于后续关闭
