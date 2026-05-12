@@ -232,5 +232,66 @@
 
 ## 第二部分：memory-milvus 实现
 
-尚未开始。
+### Task 7: 确认 Milvus 替代记忆本体 ✅ 完成
+
+**日期**：2026-05-12
+
+**性质**：纯设计确认（不涉及编码）
+
+**确认要点**：
+
+1. **互斥切换**：`plugins.slots.memory` 单一配置键，`memory-state.ts::registerMemoryCapability()` 单槽位覆盖写入，`memory-runtime.ts` 只解析一个 pluginId，天然互斥。`registry.ts` 中 `memorySlotSelected` 检查防止双 kind 插件误注册。
+
+2. **接口契约**：`memory-milvus` 实现 `MemoryPluginRuntime`（`getMemorySearchManager` / `resolveMemoryBackendConfig` / `closeAllMemorySearchManagers`）+ `MemoryPluginCapability`（`promptBuilder` / `flushPlanResolver` / `runtime`），与 memory-core 完全同构。
+
+3. **Agent 隔离**：memory-milvus 用共享 Collection + `agent_id` 字段过滤，与 memory-core 的文件系统物理隔离语义等效。`getMemorySearchManager({ agentId })` 已传入 agentId。
+
+4. **Flush 分流**：`MemoryFlushPlan.backendKind` 已支持 `"file" | "milvus"`，milvus 的 `flushPlanResolver` 返回 `{ backendKind: "milvus" }` 即可触发方案 H 的 `memory_write` 路径。
+
+**待后续关注**：
+- `RegisteredMemorySearchManager` 仍引用旧 `MemorySearchManager` 类型，Task 8 实施时迁移到 `MemoryDataBackend`
+- 阿里云 text-embedding-v3 可用性需 Task 8 前验证
+
+---
+
+### Task 8: 设计 Memory Collection Schema ✅ 完成
+
+**日期**：2026-05-12
+
+**落地文件**（新建 `extensions/memory-milvus/`）：
+
+| 文件 | 内容 |
+|------|------|
+| `package.json` | 依赖 `@zilliz/milvus2-sdk-node` ^2.5.0 |
+| `tsconfig.json` | 继承 `../tsconfig.package-boundary.base.json` |
+| `api.ts` | re-export `definePluginEntry` |
+| `openclaw.plugin.json` | kind: "memory"，配置 milvus host/port + embedding provider/model |
+| `src/schema.ts` | 完整 Schema 定义（12字段 + 3个映射函数 + 15个常量） |
+| `index.ts` | `definePluginEntry` 骨架，注册 `MemoryPluginCapability`（promptBuilder/flushPlanResolver/runtime） |
+
+**Schema 字段与 MemoryEntry/MemoryReference 映射**：
+
+| Milvus 字段 | 类型 | MemoryEntry | MemoryReference |
+|-------------|------|-------------|-----------------|
+| `id` | Int64 PK 自增 | `id` | `id` |
+| `embedding` | FloatVector(1024) | —（内部） | —（内部） |
+| `text` | VarChar(65536) | `text` | — |
+| `snippet` | VarChar(4096) | `snippet` | `snippet` |
+| `agent_id` | VarChar(256) | `agentId` | — |
+| `session_key` | VarChar(512) | `sessionKey` | — |
+| `memory_type` | VarChar(32) | `memoryType` | — |
+| `recall_count` | Int32 | `recallCount` | — |
+| `provenance_kind` | VarChar(32) | `provenance.kind` | `provenance.kind` |
+| `provenance_label` | VarChar(1024) | `provenance.label` | `provenance.label` |
+| `created_at` | VarChar(32) | `createdAt` | — |
+| `updated_at` | VarChar(32) | `updatedAt` | — |
+
+**映射函数**：
+- `rowToMemoryReference(row)` — Milvus 行 → `MemoryReference`
+- `rowToMemoryEntry(row)` — Milvus 行 → `MemoryEntry`
+- `entryToInsertData(entry)` — `Omit<MemoryEntry, "id">` → Milvus insert JSON
+
+**索引入口**：`buildPromptSection`（告诉 AI Milvus 后端语义）、`buildMilvusFlushPlan`（`backendKind: "milvus"`）、`milvusRuntime`（`getMemorySearchManager` 占位，Task 9 实现）。
+
+**编译**：tsgo 零错误（memory-milvus 文件无任何 TypeScript 错误）。
 

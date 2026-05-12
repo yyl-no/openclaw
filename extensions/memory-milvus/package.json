@@ -1,0 +1,28 @@
+{
+  "name": "@openclaw/memory-milvus",
+  "version": "2026.5.10-beta.1",
+  "private": true,
+  "description": "OpenClaw Milvus-backed memory plugin with vector search",
+  "type": "module",
+  "dependencies": {
+    "@zilliz/milvus2-sdk-node": "^2.5.0",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.10-beta.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

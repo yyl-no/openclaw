@@ -1,0 +1,84 @@
+{
+  "id": "memory-milvus",
+  "activation": {
+    "onStartup": false
+  },
+  "kind": "memory",
+  "contracts": {
+    "tools": ["memory_get", "memory_search"]
+  },
+  "uiHints": {
+    "milvus.host": {
+      "label": "Milvus Host",
+      "placeholder": "localhost",
+      "help": "Milvus server hostname or IP address"
+    },
+    "milvus.port": {
+      "label": "Milvus Port",
+      "placeholder": "19530",
+      "help": "Milvus server gRPC port"
+    },
+    "milvus.collectionName": {
+      "label": "Collection Name",
+      "placeholder": "openclaw_memory",
+      "help": "Milvus collection name for memory storage",
+      "advanced": true
+    },
+    "embedding.provider": {
+      "label": "Embedding Provider",
+      "placeholder": "alibaba",
+      "help": "Memory embedding provider adapter to use"
+    },
+    "embedding.model": {
+      "label": "Embedding Model",
+      "placeholder": "text-embedding-v3",
+      "help": "Embedding model name (1024-dimensional)"
+    },
+    "embedding.dimensions": {
+      "label": "Embedding Dimensions",
+      "placeholder": "1024",
+      "help": "Vector dimensions for the embedding model",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "milvus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "collectionName": {
+            "type": "string"
+          }
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "number",
+            "minimum": 128,
+            "maximum": 8192
+          }
+        }
+      }
+    }
+  }
+}
