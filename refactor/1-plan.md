@@ -220,9 +220,14 @@ type MemoryFlushPlan = {
 - index 类型：IVF_FLAT 或 HNSW
 - agent 隔离：共享 Collection，`agent_id` 字段过滤
 
-### Task 9: 重写搜索（混合检索 ANN + BM25）
+### Task 9: 重写搜索（混合检索 ANN + scalar filter）
 
-- 搜索行为、工具参数、返回格式与 memory-core 完全一致（仅底层从 sqlite-vec + FTS5 换为 Milvus ANN + BM25）
+- 搜索行为、工具参数、返回格式与 memory-core 完全一致（仅底层从 sqlite-vec + FTS5 换为 Milvus ANN + scalar filter）
+- **向量搜索**：`milvusClient.search({ anns_field: "embedding", vectors: [...] })`，复用已有 `EmbeddingProvider` 获取查询向量
+- **文本搜索**：`milvusClient.query({ filter: 'text like "%keyword%"' })` + 客户端 TF-IDF 计算 textScore
+- **评分融合**：`score = w1 × vectorScore + w2 × textScore` → MMR → 时间衰减
+- embedding：不注册独立 provider，通过已有 `EmbeddingProvider` 接口透明调用
+- **⚠️ 后期升级**：Milvus ≥ 2.4 部署并手动创建 BM25 Function 后，将 scalar filter 切换为原生 BM25 稀疏向量搜索，删除客户端 TF-IDF 计算（见 `2-decisions.md` §8.1）
 
 ### Task 10: 重写写入 capture/flush 流程
 

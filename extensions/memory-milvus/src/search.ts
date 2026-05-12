@@ -1,0 +1,525 @@
+/**
+ * Milvus 混合检索（ANN + scalar filter）实现
+ *
+ * 依据：1-plan.md §Task9 + 2-decisions.md §8.1
+ *
+ * - 向量搜索：milvusClient.search({ anns_field: "embedding" })
+ * - 文本搜索：milvusClient.query({ filter: 'text like "%keyword%"' }) + 客户端 TF-IDF
+ * - 评分融合：score = w1 × vectorScore + w2 × textScore → MMR → 时间衰减
+ * - ⚠️ 后期升级：Milvus ≥ 2.4 BM25 Function 后切换为原生 BM25（见 decisions §8.1）
+ */
+
+import { MilvusClient, type SearchSimpleReq, type QueryReq } from "@zilliz/milvus2-sdk-node";
+import type { MemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+import type {
+  MemoryEmbeddingProbeResult,
+  MemoryProviderStatus,
+  MemoryReadResult,
+  MemoryReference,
+  MemorySearchRuntimeDebug,
+} from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import {
+  FIELD_AGENT_ID,
+  FIELD_CREATED_AT,
+  FIELD_EMBEDDING,
+  FIELD_ID,
+  FIELD_SNIPPET,
+  FIELD_TEXT,
+  OUTPUT_FIELDS,
+  rowToMemoryEntry,
+  rowToMemoryReference,
+} from "./schema.js";
+
+// ── 配置类型 ──────────────────────────────────────────────────────
+
+export interface MilvusSearchConfig {
+  host: string;
+  port: number;
+  collectionName: string;
+  embedding: {
+    provider: string;
+    model: string;
+    dimensions?: number;
+  };
+}
+
+// ── 默认参数 ──────────────────────────────────────────────────────
+
+const DEFAULT_MAX_RESULTS = 10;
+const DEFAULT_MIN_SCORE = 0;
+const DEFAULT_VECTOR_WEIGHT = 0.7;
+const DEFAULT_TEXT_WEIGHT = 0.3;
+/** 向量搜索拉取倍数（扩大召回池供融合筛选） */
+const VECTOR_FETCH_MULTIPLIER = 3;
+
+// ── 关键词抽取 ────────────────────────────────────────────────────
+
+/**
+ * 从查询文本中抽取关键词（用于 scalar filter）
+ * 返回去重后的关键词列表。
+ */
+function extractKeywords(query: string): string[] {
+  const tokens = query
+    .toLowerCase()
+    .match(/[\p{L}\p{N}_]+/gu)
+    ?.map((t) => t.trim())
+    .filter((t) => t.length >= 2) ?? [];
+  return [...new Set(tokens)];
+}
+
+/**
+ * 构建 Milvus scalar filter 表达式（"text like" 查询）
+ * 使用 OR 连接多个关键词的 like 条件。
+ */
+function buildKeywordFilter(keywords: string[], agentId?: string): string {
+  const parts: string[] = [];
+
+  if (agentId) {
+    parts.push(`${FIELD_AGENT_ID} == "${agentId.replace(/"/g, '\\"')}"`);
+  }
+
+  if (keywords.length > 0) {
+    const likeClauses = keywords.map(
+      (kw) => `${FIELD_TEXT} like "%${kw.replace(/%/g, "\\%").replace(/_/g, "\\_").replace(/"/g, '\\"')}%"`,
+    );
+    parts.push(`(${likeClauses.join(" || ")})`);
+  }
+
+  return parts.join(" && ");
+}
+
+// ── TF-IDF ────────────────────────────────────────────────────────
+
+/**
+ * 客户端 TF-IDF 评分
+ * 对 query() 返回的关键词搜索结果计算 textScore。
+ */
+function computeTfIdfScores(
+  docs: Array<{ id: string; text: string }>,
+  queryKeywords: string[],
+): Map<string, number> {
+  const scores = new Map<string, number>();
+  if (docs.length === 0 || queryKeywords.length === 0) return scores;
+
+  const totalDocs = docs.length;
+  const idf = new Map<string, number>();
+
+  // 计算 IDF：关键词在多少文档中出现
+  for (const kw of queryKeywords) {
+    const docCount = docs.filter((d) =>
+      d.text.toLowerCase().includes(kw),
+    ).length;
+    // IDF = log(1 + N / df)
+    idf.set(kw, Math.log(1 + totalDocs / Math.max(1, docCount)));
+  }
+
+  // 计算每个文档的 TF-IDF 总分
+  for (const doc of docs) {
+    const lowerText = doc.text.toLowerCase();
+    let score = 0;
+    for (const kw of queryKeywords) {
+      const idfVal = idf.get(kw) ?? 0;
+      if (idfVal <= 0) continue;
+      // TF = 关键词出现次数
+      const matches = lowerText.split(kw).length - 1;
+      if (matches > 0) {
+        // 子线性 TF：1 + log(tf)
+        score += (1 + Math.log(matches)) * idfVal;
+      }
+    }
+    scores.set(doc.id, score);
+  }
+
+  // 归一化到 0-1
+  const maxScore = Math.max(1, ...scores.values());
+  for (const [id, score] of scores) {
+    scores.set(id, score / maxScore);
+  }
+
+  return scores;
+}
+
+// ── 向量分数归一化 ────────────────────────────────────────────────
+
+/**
+ * 向量距离 → 相似度分数 (0-1)
+ * 支持 L2 和 IP/COSINE 度量类型。
+ */
+function normalizeVectorScore(rawScore: number, metricType?: string): number {
+  if (metricType === "L2") {
+    // L2 距离：越小越好，映射到 0-1
+    return 1 / (1 + rawScore);
+  }
+  // IP/COSINE：越大越好，截断到 0-1
+  return Math.max(0, Math.min(1, rawScore));
+}
+
+// ── 时间衰减 ──────────────────────────────────────────────────────
+
+/**
+ * 时间衰减因子
+ * 越旧的记忆分数越低。
+ */
+function temporalDecayFactor(createdAt: string, halfLifeDays = 30): number {
+  if (!createdAt) return 1;
+  const createdMs = Date.parse(createdAt);
+  if (Number.isNaN(createdMs)) return 1;
+  const ageDays = (Date.now() - createdMs) / (1000 * 60 * 60 * 24);
+  if (ageDays <= 0) return 1;
+  // 半衰期衰减：2^(-age/halfLife)
+  return Math.pow(2, -ageDays / halfLifeDays);
+}
+
+// ── MMR（最大边际相关性）───────────────────────────────────────────
+
+/**
+ * MMR 重排序：平衡相关性与多样性
+ */
+function applyMMR(
+  results: MemoryReference[],
+  lambda = 0.7,
+  maxResults: number,
+): MemoryReference[] {
+  if (results.length <= 1) return results;
+
+  const selected: MemoryReference[] = [];
+  const candidates = [...results];
+
+  // 第一个结果选最高分
+  candidates.sort((a, b) => b.score - a.score);
+  selected.push(candidates.shift()!);
+
+  while (selected.length < maxResults && candidates.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const relevance = candidates[i].score;
+      // 与已选结果的最大文本相似度（Jaccard 近似）
+      let maxSimilarity = 0;
+      const candTokens = new Set(candidates[i].snippet.toLowerCase().split(/\s+/));
+      for (const sel of selected) {
+        const selTokens = new Set(sel.snippet.toLowerCase().split(/\s+/));
+        const intersection = [...candTokens].filter((t) => selTokens.has(t)).length;
+        const union = new Set([...candTokens, ...selTokens]).size;
+        const similarity = union > 0 ? intersection / union : 0;
+        maxSimilarity = Math.max(maxSimilarity, similarity);
+      }
+      const mmrScore = lambda * relevance - (1 - lambda) * maxSimilarity;
+      if (mmrScore > bestScore) {
+        bestScore = mmrScore;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(candidates.splice(bestIdx, 1)[0]);
+  }
+
+  return selected;
+}
+
+// ── MilvusSearchManager ───────────────────────────────────────────
+
+export class MilvusSearchManager {
+  private closed = false;
+
+  constructor(
+    private readonly client: MilvusClient,
+    private readonly collectionName: string,
+    private readonly provider: MemoryEmbeddingProvider,
+    private readonly agentId: string,
+    private readonly cfg: MilvusSearchConfig,
+  ) {}
+
+  // ── 主搜索 ────────────────────────────────────────────────────
+
+  async search(
+    query: string,
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      sessionKey?: string;
+      agentId?: string;
+      qmdSearchModeOverride?: "query" | "search" | "vsearch";
+      onDebug?: (debug: MemorySearchRuntimeDebug) => void;
+    },
+  ): Promise<MemoryReference[]> {
+    if (this.closed) return [];
+    const maxResults = opts?.maxResults ?? DEFAULT_MAX_RESULTS;
+    const minScore = opts?.minScore ?? DEFAULT_MIN_SCORE;
+    const effectiveAgentId = opts?.agentId ?? this.agentId;
+    const fetchLimit = Math.max(maxResults * VECTOR_FETCH_MULTIPLIER, 20);
+
+    // 清理查询文本
+    const cleaned = query.trim();
+    if (!cleaned) return [];
+
+    // 1. 向量 ANN 搜索
+    let vectorRefs: MemoryReference[] = [];
+    try {
+      const queryVec = await this.provider.embedQuery(cleaned);
+      const hasVector = queryVec.some((v) => v !== 0);
+      if (hasVector) {
+        vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit);
+      }
+    } catch (err) {
+      // 向量搜索失败不阻断整体搜索
+      console.warn("[memory-milvus] vector search failed:", err);
+    }
+
+    // 2. 文本关键词搜索
+    let keywordRefs: MemoryReference[] = [];
+    const keywords = extractKeywords(cleaned);
+    if (keywords.length > 0) {
+      try {
+        keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit);
+      } catch (err) {
+        console.warn("[memory-milvus] keyword search failed:", err);
+      }
+    }
+
+    // 3. 评分融合
+    const merged = this.mergeResults(
+      vectorRefs,
+      keywordRefs,
+      DEFAULT_VECTOR_WEIGHT,
+      DEFAULT_TEXT_WEIGHT,
+    );
+
+    // 4. MMR 重排序
+    const mmrResults = applyMMR(merged, 0.7, maxResults * 2);
+
+    // 5. 过滤、排序、截断
+    return mmrResults
+      .filter((r) => r.score >= minScore)
+      .slice(0, maxResults);
+  }
+
+  // ── 向量搜索 ──────────────────────────────────────────────────
+
+  private async searchVector(
+    vector: number[],
+    agentId: string,
+    limit: number,
+  ): Promise<MemoryReference[]> {
+    const request: SearchSimpleReq = {
+      collection_name: this.collectionName,
+      vector,
+      anns_field: FIELD_EMBEDDING,
+      limit,
+      output_fields: [...OUTPUT_FIELDS],
+    };
+
+    if (agentId) {
+      request.filter = `${FIELD_AGENT_ID} == "${agentId.replace(/"/g, '\\"')}"`;
+    }
+
+    const response = await this.client.search(request);
+
+    if (!response.results || response.results.length === 0) {
+      return [];
+    }
+
+    return response.results.map((r) => {
+      const ref = rowToMemoryReference(r as unknown as Record<string, unknown>);
+      ref.score = normalizeVectorScore(r.score, "COSINE");
+      ref.vectorScore = ref.score;
+      return ref;
+    });
+  }
+
+  // ── 关键词搜索 ────────────────────────────────────────────────
+
+  private async searchKeyword(
+    keywords: string[],
+    agentId: string,
+    limit: number,
+  ): Promise<MemoryReference[]> {
+    const filter = buildKeywordFilter(keywords, agentId);
+
+    const request: QueryReq = {
+      collection_name: this.collectionName,
+      filter,
+      output_fields: [FIELD_ID, FIELD_TEXT, FIELD_SNIPPET, FIELD_CREATED_AT, ...OUTPUT_FIELDS.filter(
+        (f) => f !== FIELD_ID && f !== FIELD_TEXT && f !== FIELD_SNIPPET,
+      )],
+      limit,
+    };
+
+    const response = await this.client.query(request);
+
+    if (!response.data || response.data.length === 0) {
+      return [];
+    }
+
+    // 客户端 TF-IDF 计算 textScore
+    const docs = response.data.map((row: Record<string, unknown>) => ({
+      id: String(row[FIELD_ID] ?? ""),
+      text: String(row[FIELD_TEXT] ?? ""),
+    }));
+    const tfidfScores = computeTfIdfScores(docs, keywords);
+
+    return response.data.map((row: Record<string, unknown>) => {
+      const ref = rowToMemoryReference(row);
+      ref.textScore = tfidfScores.get(ref.id) ?? 0;
+      ref.score = ref.textScore;
+      return ref;
+    });
+  }
+
+  // ── 结果融合 ──────────────────────────────────────────────────
+
+  private mergeResults(
+    vectorRefs: MemoryReference[],
+    keywordRefs: MemoryReference[],
+    vectorWeight: number,
+    textWeight: number,
+  ): MemoryReference[] {
+    const byId = new Map<string, MemoryReference>();
+
+    // 向量结果
+    for (const r of vectorRefs) {
+      byId.set(r.id, {
+        ...r,
+        textScore: 0,
+        score: vectorWeight * (r.vectorScore ?? r.score),
+      });
+    }
+
+    // 关键词结果
+    for (const r of keywordRefs) {
+      const existing = byId.get(r.id);
+      if (existing) {
+        existing.textScore = r.textScore ?? r.score;
+        existing.score = vectorWeight * (existing.vectorScore ?? 0) + textWeight * (r.textScore ?? r.score);
+        // 优先使用关键词匹配的 snippet（更相关）
+        if (r.snippet && r.snippet.length > (existing.snippet?.length ?? 0)) {
+          existing.snippet = r.snippet;
+        }
+      } else {
+        byId.set(r.id, {
+          ...r,
+          vectorScore: 0,
+          score: textWeight * (r.textScore ?? r.score),
+        });
+      }
+    }
+
+    // 应用时间衰减
+    const results: MemoryReference[] = [];
+    for (const [, ref] of byId) {
+      const decay = temporalDecayFactor(
+        (ref as Record<string, unknown>)[FIELD_CREATED_AT] as string ?? "",
+        30,
+      );
+      results.push({ ...ref, score: ref.score * decay });
+    }
+
+    // 按分数降序排列
+    results.sort((a, b) => b.score - a.score);
+    return results;
+  }
+
+  // ── 按 ID 读取 ────────────────────────────────────────────────
+
+  async readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+
+    // Milvus 后端：relPath 解释为记忆 ID
+    const id = params.relPath.trim();
+    if (!id) throw new Error("Missing memory id");
+
+    const response = await this.client.get({
+      collection_name: this.collectionName,
+      ids: [id],
+      output_fields: [FIELD_ID, FIELD_TEXT, FIELD_SNIPPET],
+    });
+
+    if (!response.data || response.data.length === 0) {
+      throw new Error(`Memory entry not found: ${id}`);
+    }
+
+    const entry = rowToMemoryEntry(response.data[0] as Record<string, unknown>);
+    let text = entry.text;
+    const from = params.from ?? 0;
+    const lines = params.lines;
+
+    if (lines !== undefined || from > 0) {
+      const textLines = text.split("\n");
+      const sliced = textLines.slice(from, lines !== undefined ? from + lines : undefined);
+      text = sliced.join("\n");
+    }
+
+    return {
+      text,
+      path: `milvus:${id}`,
+      truncated: false,
+      from,
+      lines,
+      nextFrom: lines !== undefined ? from + lines : undefined,
+    };
+  }
+
+  // ── 状态 ──────────────────────────────────────────────────────
+
+  status(): MemoryProviderStatus {
+    return {
+      backend: "qmd",
+      provider: this.cfg.embedding.provider,
+      model: this.cfg.embedding.model,
+      requestedProvider: this.cfg.embedding.provider,
+      sources: ["memory"],
+      custom: {
+        milvusHost: this.cfg.host,
+        milvusPort: this.cfg.port,
+        collectionName: this.collectionName,
+        collectionClosed: this.closed,
+      },
+    };
+  }
+
+  // ── 探测 ──────────────────────────────────────────────────────
+
+  async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
+    try {
+      const vec = await this.provider.embedQuery("ping");
+      if (vec.length > 0) {
+        return { ok: true, checked: true, checkedAtMs: Date.now() };
+      }
+      return { ok: false, error: "Empty embedding vector", checked: true, checkedAtMs: Date.now() };
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Embedding probe failed: ${String(err)}`,
+        checked: true,
+        checkedAtMs: Date.now(),
+      };
+    }
+  }
+
+  async probeVectorAvailability(): Promise<boolean> {
+    try {
+      const result = await this.probeEmbeddingAvailability();
+      return result.ok && !this.closed;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── 生命周期 ──────────────────────────────────────────────────
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+  }
+}
+
+// ── 工厂函数 ───────────────────────────────────────────────────────
+
+/**
+ * 创建 MilvusClient 实例
+ */
+export function createMilvusClient(host: string, port: number): MilvusClient {
+  const address = host.includes(":") ? host : `${host}:${port}`;
+  return new MilvusClient(address);
+}

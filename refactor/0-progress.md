@@ -295,3 +295,36 @@
 
 **编译**：tsgo 零错误（memory-milvus 文件无任何 TypeScript 错误）。
 
+---
+
+### Task 9: 重写搜索（混合检索 ANN + scalar filter）✅ 完成
+
+**日期**：2026-05-12
+
+**依据**：`1-plan.md` §Task9 + `2-decisions.md` §8/8.1
+
+**改动文件**：
+- `extensions/memory-milvus/src/search.ts`（新建，527行）— `MilvusSearchManager` 类，实现 `MemorySearchManager` 接口
+- `extensions/memory-milvus/index.ts`（修改）— 接入 `getMemoryEmbeddingProvider` + `MilvusSearchManager` 组装
+
+**实现要点**：
+
+| 检索路 | 方式 | 评分 |
+|--------|------|------|
+| 向量 ANN | `milvusClient.search({ anns_field: "embedding" })` | 原生 cosine/L2 距离 → 归一化 |
+| 文本关键词 | `milvusClient.query({ filter: 'text like "%keyword%"' })` | 客户端 TF-IDF 计算 textScore |
+| 融合 | 客户端加权 | `score = 0.7 × vectorScore + 0.3 × textScore` |
+| 重排 | MMR (λ=0.7) | 去冗余 |
+| 衰减 | temporalDecayFactor(30天半衰期) | 旧记忆降权 |
+
+- **EmbeddingProvider**：通过 `getMemoryEmbeddingProvider(id, cfg)` → `adapter.create(options)` 透明调用，与 memory-lancedb 模式一致
+- **`MilvusSearchManager` 方法**：`search()`（混合检索入口）、`readFile()`、`status()`、`probeEmbeddingAvailability()`、`probeVectorAvailability()`、`close()`
+- **辅助函数**：`extractKeywords()`、`buildKeywordFilter()`、`computeTfIdfScores()`、`normalizeVectorScore()`、`temporalDecayFactor()`、`applyMMR()`、`createMilvusClient()`
+
+**编译验证**：`tsgo` memory-milvus 零错误，`pnpm build` 通过。
+
+**⚠️ 问题记录**：
+- TS6133: `TEXT_FETCH_MULTIPLIER` 声明未使用 → 🔧 删除未使用常量
+- TS2304: `FIELD_CREATED_AT` 未导入 → 🔧 在 search.ts 中添加 `FIELD_CREATED_AT` 导入
+- tsdown optional peerDependency `unrun` 缺失导致 `pnpm build` 失败 → 🔧 `pnpm add -D unrun -w` 修复
+

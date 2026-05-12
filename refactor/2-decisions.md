@@ -182,6 +182,28 @@ memory-milvus 采用**混合检索（ANN + 关键词）**，与 memory-core 行�
 
 **除底层向量数据库不同外，搜索行为、工具参数、返回格式与 memory-core 完全一致。**
 
+### 8.1 BM25 现状与临时策略（2026-05-12 确认）
+
+`@zilliz/milvus2-sdk-node` v2.4.11 **不提供** `createFunction` / `BM25EmbeddingFunction` API，
+无法通过 Node.js 代码创建 BM25 Function。BM25 Function 需在 Milvus 服务端通过 RESTful
+API v2 或管理工具（pymilvus / Attu）手动创建后再对接。
+
+**当前实现（第一阶段）**：
+
+| 检索路 | 方式 | 评分 |
+|--------|------|------|
+| 向量 ANN | `search({ anns_field: "embedding" })` | 原生 cosine/L2 距离 |
+| 文本关键词 | `query({ filter: 'text like "%keyword%"' })` | 客户端 TF-IDF 计算 textScore |
+| 融合 | `WeightedRanker` 或客户端加权 | `score = w1 × vectorScore + w2 × textScore` |
+
+**⚠️ TODO — 迁移到原生 BM25**：
+
+> 当 Milvus 实例 ≥ 2.4 且已创建 BM25 Function 后：
+> 1. 在 `memory-milvus/src/search.ts` 中将 `searchKeyword()` 的 `query(filter)` 替换为
+>    `hybridSearch({ data: [{ anns_field: "sparse_bm25" }], rerank: WeightedRanker(...) })`
+> 2. 删除客户端 TF-IDF 计算逻辑
+> 3. 跑一遍 `pnpm test extensions/memory-milvus` 确认 textScore 仍然正常产出加权融合结果
+
 ---
 
 ## 9. Collection Schema
@@ -204,6 +226,20 @@ memory-milvus 采用**混合检索（ANN + 关键词）**，与 memory-core 行�
 - embedding 模型：阿里云 text-embedding-v3（1024维）
 - index 类型：IVF_FLAT 或 HNSW（根据数据量选择）
 - agent 隔离：一个 Collection 存所有 agent，通过 `agent_id` 字段过滤
+
+### 9.1 Embedding Provider 策略（2026-05-12 确认）
+
+`memory-milvus` 本身不注册独立的 Embedding Provider，而是复用项目已有的
+`MemoryEmbeddingProvider` 基础设施。embed + search 代码通过 `EmbeddingProvider.embedSingle()` /
+`EmbeddingProvider.embedBatch()` 获取向量，不与任何具体模型 API 耦合。
+
+**⚠️ TODO — 切换到目标模型**：
+
+> 当需要切换到最终使用的 embedding 模型时：
+> 1. 新增对应的 embedding provider adapter（参考 `extensions/openai/` 的模式），
+>    注册为 `registerMemoryEmbeddingProvider(adapter)`
+> 2. `memory-milvus` 的 search / write 代码**零改动** — provider 层对上层透明
+> 3. 跑 `pnpm test extensions/memory-milvus` 确认对应维度向量读写正常
 
 ---
 
