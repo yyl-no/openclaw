@@ -34,6 +34,7 @@ import {
 import { bm25RankToScore, buildFtsQuery, mergeHybridResults } from "./hybrid.js";
 import { awaitPendingManagerWork, startAsyncSearchSync } from "./manager-async-state.js";
 import { MEMORY_BATCH_FAILURE_LIMIT } from "./manager-batch-state.js";
+import { appendMemoryFileSafe, resolveDailyMemoryRelativePath } from "./memory-append-safe.js";
 import {
   closeManagedCacheEntries,
   getOrCreateManagedCacheEntry,
@@ -58,6 +59,11 @@ import {
   type MemoryReadonlyRecoveryState,
 } from "./manager-sync-control.js";
 import { applyTemporalDecayToHybridResults } from "./temporal-decay.js";
+import {
+  applyShortTermPromotions,
+  rankShortTermPromotionCandidates,
+  recordShortTermRecalls,
+} from "../short-term-promotion.js";
 const SNIPPET_MAX_CHARS = 700;
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
@@ -785,16 +791,110 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
   }
 
   async write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
-    // Stub – full implementation in flush task
-    throw new Error("memory-core write() not yet implemented");
+    const text = entry.text?.trim() ?? "";
+    if (!text) {
+      throw new Error("memory-core write(): text must be a non-empty string");
+    }
+    const relativePath = resolveDailyMemoryRelativePath();
+    const result = await appendMemoryFileSafe({
+      workspaceDir: this.workspaceDir,
+      relativePath,
+      text,
+    });
+    this.dirty = true;
+    const id = `file:${result.relativePath}:${result.startLine}:${result.endLine}`;
+    const snippet =
+      entry.snippet?.trim() || text.slice(0, SNIPPET_MAX_CHARS);
+    return {
+      id,
+      snippet,
+      score: 1,
+      provenance: {
+        kind: "file",
+        label: `${result.relativePath} L${result.startLine}-${result.endLine}`,
+      },
+    };
   }
 
   async recordRecall(ids: string[]): Promise<void> {
-    // Stub – delegates to short-term-promotion
+    if (ids.length === 0) return;
+
+    const refs: MemoryReference[] = [];
+    for (const id of ids) {
+      try {
+        if (!id.startsWith("file:")) continue;
+        const parsed = id.slice("file:".length);
+        const lastColon1 = parsed.lastIndexOf(":");
+        const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
+        if (lastColon2 < 0) continue;
+        const relPath = parsed.slice(0, lastColon2);
+        const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
+        const endLine = Number(parsed.slice(lastColon1 + 1));
+        if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) continue;
+        const lines = endLine - startLine + 1;
+        if (lines < 1) continue;
+        const file = await this.readFile({ relPath, from: startLine, lines });
+        const snippet = file.text.slice(0, SNIPPET_MAX_CHARS);
+        if (!snippet.trim()) continue;
+        refs.push({
+          id,
+          snippet,
+          score: 1,
+          provenance: { kind: "file", label: `${relPath} L${startLine}-${endLine}` },
+        });
+      } catch {
+        // Skip unresolvable ids; recall tracking is best-effort.
+      }
+    }
+
+    if (refs.length === 0) return;
+
+    void recordShortTermRecalls({
+      workspaceDir: this.workspaceDir,
+      query: refs[0]!.id,
+      results: refs,
+    }).catch(() => {
+      // Recall tracking is best-effort and must never throw.
+    });
   }
 
   async promote(ids: string[]): Promise<void> {
-    // Stub – delegates to dreaming promotion
+    if (ids.length === 0) return;
+
+    const targetKeys = new Set<string>();
+    for (const id of ids) {
+      try {
+        if (!id.startsWith("file:")) continue;
+        const parsed = id.slice("file:".length);
+        const lastColon1 = parsed.lastIndexOf(":");
+        const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
+        if (lastColon2 < 0) continue;
+        const pathPortion = parsed.slice(0, lastColon2);
+        const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
+        const endLine = Number(parsed.slice(lastColon1 + 1));
+        if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) continue;
+        targetKeys.add(`${pathPortion}:${startLine}:${endLine}`);
+      } catch {
+        // Skip invalid ids.
+      }
+    }
+
+    if (targetKeys.size === 0) return;
+
+    const candidates = await rankShortTermPromotionCandidates({
+      workspaceDir: this.workspaceDir,
+      includePromoted: true,
+    });
+
+    const matched = candidates.filter((c) =>
+      targetKeys.has(`${c.path}:${c.startLine}:${c.endLine}`),
+    );
+    if (matched.length === 0) return;
+
+    await applyShortTermPromotions({
+      workspaceDir: this.workspaceDir,
+      candidates: matched,
+    });
   }
 
   status(): MemoryProviderStatus {

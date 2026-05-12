@@ -154,6 +154,11 @@
   - 特性：路径白名单（`memory/YYYY-MM-DD.md`）、保留文件拒写、per-path 并发锁、append-only、返回 1-based 行号区间
   - 类型：`tsgo` 验证两处改动无新增错误
 - ⏳ A2：实现 `manager.write/recordRecall/promote` 三方法
+  - `write(entry)`: 调 `resolveDailyMemoryRelativePath` + `appendMemoryFileSafe`，设置 `this.dirty = true`，返回 `MemoryReference`（id=`file:path:start:end`, score=1）
+  - `recordRecall(ids)`: 解析 `file:path:start:end` ID → 读文件提取 snippet → 调 `recordShortTermRecalls`（best-effort，fire-and-forget）
+  - `promote(ids)`: 解析 ID 提取 path→ 调 `rankShortTermPromotionCandidates` → 过滤匹配候选 → 调 `applyShortTermPromotions`
+  - 改动文件：`extensions/memory-core/src/memory/manager.ts`（+2 imports，+98 行实现，-4 行 stub）
+  - 类型：`tsgo` 验证无新增错误
 - ⏳ A3：调用方收敛（`tools.ts::queueShortTermRecallTracking`、`dreaming.ts::L601`）
 - ⏳ A4：接口签名扩展 `recordRecall(refs, context?)`
 
