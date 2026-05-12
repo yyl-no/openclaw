@@ -147,20 +147,24 @@
 **详细计划**：见 `1-plan.md` §方案 H 执行计划。
 
 **执行状态**：
+
+> **顺序调整说明**（2026-05-12）：原计划 A1→A2→A3→A4，实际执行中发现 A2 的 `recordRecall` 需要新签名 `(refs, context?)`，但接口 `MemoryDataBackend` 仍是旧签名 `(ids: string[])`，导致 A2 实现编译报错 TS2416。因此将 A4（接口签名）前置到 A2 修正之前：**A1 → A4 → A2修正 → A3**。
+
 - ✅ A1：抽取 `appendMemoryFileSafe` 公共原语 + 导出 `formatDateStampInTimezone`（2026-05-12）
   - 新文件：`extensions/memory-core/src/memory/memory-append-safe.ts`（204 行）
   - 修改：`extensions/memory-core/src/flush-plan.ts`（`formatDateStampInTimezone` 改 export）
   - 导出：`appendMemoryFileSafe()`、`resolveDailyMemoryRelativePath()`、`RESERVED_MEMORY_FILES`
   - 特性：路径白名单（`memory/YYYY-MM-DD.md`）、保留文件拒写、per-path 并发锁、append-only、返回 1-based 行号区间
-  - 类型：`tsgo` 验证两处改动无新增错误
-- ⏳ A2：实现 `manager.write/recordRecall/promote` 三方法
-  - `write(entry)`: 调 `resolveDailyMemoryRelativePath` + `appendMemoryFileSafe`，设置 `this.dirty = true`，返回 `MemoryReference`（id=`file:path:start:end`, score=1）
-  - `recordRecall(ids)`: 解析 `file:path:start:end` ID → 读文件提取 snippet → 调 `recordShortTermRecalls`（best-effort，fire-and-forget）
-  - `promote(ids)`: 解析 ID 提取 path→ 调 `rankShortTermPromotionCandidates` → 过滤匹配候选 → 调 `applyShortTermPromotions`
-  - 改动文件：`extensions/memory-core/src/memory/manager.ts`（+2 imports，+98 行实现，-4 行 stub）
   - 类型：`tsgo` 验证无新增错误
+- ⚠️ A2：已实现但需修正（2026-05-12）
+  - `write(entry)` ✅ 正确：调 `resolveDailyMemoryRelativePath` + `appendMemoryFileSafe`，`dirty = true`，返回 `MemoryReference`
+  - `promote(ids)` ✅ 正确：解析 ID → `rankShortTermPromotionCandidates` → 过滤匹配 → `applyShortTermPromotions`
+  - `recordRecall(ids)` ❌ 签名不对：当前用旧签名 `(ids: string[])`，内部做 ID 反解析+读文件，query 回退为 `refs[0]!.id`
+  - **待修正**：改为 `recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string })`，变为纯薄封装 `recordShortTermRecalls`，删去 ID 解析/readFile 冗余逻辑
+- ✅ A4：接口签名扩展落地（2026-05-12，前置执行）
+  - `packages/memory-host-sdk/src/host/types.ts`：`recordRecall(ids: string[])` → `recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string })`
+  - 预期 manager.ts 报 TS2416 — 待 A2 修正消除
 - ⏳ A3：调用方收敛（`tools.ts::queueShortTermRecallTracking`、`dreaming.ts::L601`）
-- ⏳ A4：接口签名扩展 `recordRecall(refs, context?)`
 
 
 ---

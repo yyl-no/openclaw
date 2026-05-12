@@ -157,7 +157,7 @@ export interface MemoryDataBackend {
   ): Promise<MemoryReference[]>;
   get(id: string): Promise<MemoryEntry>;
   write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference>;
-  recordRecall(ids: string[]): Promise<void>;
+  recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string }): Promise<void>;
   promote(ids: string[]): Promise<void>;
   status(): MemoryProviderStatus;
   sync?(params?: {
