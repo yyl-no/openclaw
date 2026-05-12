@@ -40,6 +40,7 @@ export type {
   MemorySearchResult,
   MemorySource,
   MemorySyncProgressUpdate,
+  PromotionCandidate,
 } from "./host/types.js";
 export { ensureMemoryIndexSchema } from "./host/memory-schema.js";
 export { loadSqliteVecExtension } from "./host/sqlite-vec.js";

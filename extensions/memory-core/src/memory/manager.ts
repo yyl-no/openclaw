@@ -22,6 +22,7 @@ import {
   type MemorySearchResult,
   type MemorySource,
   type MemorySyncProgressUpdate,
+  type PromotionCandidate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   createEmbeddingProvider,
@@ -831,43 +832,104 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     });
   }
 
-  async promote(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-
-    const targetKeys = new Set<string>();
-    for (const id of ids) {
-      try {
-        if (!id.startsWith("file:")) continue;
-        const parsed = id.slice("file:".length);
-        const lastColon1 = parsed.lastIndexOf(":");
-        const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
-        if (lastColon2 < 0) continue;
-        const pathPortion = parsed.slice(0, lastColon2);
-        const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
-        const endLine = Number(parsed.slice(lastColon1 + 1));
-        if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) continue;
-        targetKeys.add(`${pathPortion}:${startLine}:${endLine}`);
-      } catch {
-        // Skip invalid ids.
-      }
-    }
-
-    if (targetKeys.size === 0) return;
-
+  async rankPromotionCandidates(opts: {
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    recencyHalfLifeDays?: number;
+    nowMs?: number;
+  }): Promise<PromotionCandidate[]> {
     const candidates = await rankShortTermPromotionCandidates({
       workspaceDir: this.workspaceDir,
-      includePromoted: true,
+      limit: opts.limit,
+      minScore: opts.minScore,
+      minRecallCount: opts.minRecallCount,
+      minUniqueQueries: opts.minUniqueQueries,
+      maxAgeDays: opts.maxAgeDays,
+      recencyHalfLifeDays: opts.recencyHalfLifeDays,
+      nowMs: opts.nowMs,
     });
+    return candidates.map((c) => ({
+      id: `file:${c.path}:${c.startLine}:${c.endLine}`,
+      snippet: c.snippet,
+      score: c.score,
+      recallCount: c.recallCount,
+      uniqueQueries: c.uniqueQueries,
+    }));
+  }
 
-    const matched = candidates.filter((c) =>
-      targetKeys.has(`${c.path}:${c.startLine}:${c.endLine}`),
-    );
-    if (matched.length === 0) return;
+  async applyPromotions(opts: {
+    candidates: PromotionCandidate[];
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    timezone?: string;
+    nowMs?: number;
+  }): Promise<{ applied: number; appliedCandidates: PromotionCandidate[] }> {
+    if (opts.candidates.length === 0) return { applied: 0, appliedCandidates: [] };
 
-    await applyShortTermPromotions({
+    const internalCandidates: Array<{
+      key: string;
+      path: string;
+      startLine: number;
+      endLine: number;
+      source: "memory";
+      snippet: string;
+      recallCount: number;
+      score: number;
+      uniqueQueries: number;
+    }> = [];
+    for (const c of opts.candidates) {
+      if (!c.id.startsWith("file:")) continue;
+      const parsed = c.id.slice("file:".length);
+      const lastColon1 = parsed.lastIndexOf(":");
+      const lastColon2 = parsed.lastIndexOf(":", lastColon1 - 1);
+      if (lastColon2 < 0) continue;
+      const path = parsed.slice(0, lastColon2);
+      const startLine = Number(parsed.slice(lastColon2 + 1, lastColon1));
+      const endLine = Number(parsed.slice(lastColon1 + 1));
+      if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) continue;
+      internalCandidates.push({
+        key: c.id,
+        path,
+        startLine,
+        endLine,
+        source: "memory",
+        snippet: c.snippet,
+        recallCount: c.recallCount,
+        score: c.score,
+        uniqueQueries: c.uniqueQueries,
+      });
+    }
+
+    if (internalCandidates.length === 0) return { applied: 0, appliedCandidates: [] };
+
+    const result = await applyShortTermPromotions({
       workspaceDir: this.workspaceDir,
-      candidates: matched,
+      candidates: internalCandidates as any,
+      limit: opts.limit,
+      minScore: opts.minScore,
+      minRecallCount: opts.minRecallCount,
+      minUniqueQueries: opts.minUniqueQueries,
+      maxAgeDays: opts.maxAgeDays,
+      timezone: opts.timezone,
+      nowMs: opts.nowMs,
     });
+
+    return {
+      applied: result.applied,
+      appliedCandidates: result.appliedCandidates.map((ac) => ({
+        id: `file:${ac.path}:${ac.startLine}:${ac.endLine}`,
+        snippet: ac.snippet,
+        score: ac.score,
+        recallCount: ac.recallCount,
+        uniqueQueries: ac.uniqueQueries,
+      })),
+    };
   }
 
   status(): MemoryProviderStatus {

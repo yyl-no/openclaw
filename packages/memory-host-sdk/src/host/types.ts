@@ -158,7 +158,25 @@ export interface MemoryDataBackend {
   get(id: string): Promise<MemoryEntry>;
   write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference>;
   recordRecall(refs: MemoryReference[], context?: { query: string; timezone?: string }): Promise<void>;
-  promote(ids: string[]): Promise<void>;
+  rankPromotionCandidates(opts: {
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    recencyHalfLifeDays?: number;
+    nowMs?: number;
+  }): Promise<PromotionCandidate[]>;
+  applyPromotions(opts: {
+    candidates: PromotionCandidate[];
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    timezone?: string;
+    nowMs?: number;
+  }): Promise<{ applied: number; appliedCandidates: PromotionCandidate[] }>;
   status(): MemoryProviderStatus;
   sync?(params?: {
     reason?: string;
@@ -167,4 +185,12 @@ export interface MemoryDataBackend {
     progress?: (update: MemorySyncProgressUpdate) => void;
   }): Promise<void>;
   close?(): Promise<void>;
+}
+
+export interface PromotionCandidate {
+  id: string;
+  snippet: string;
+  score: number;
+  recallCount: number;
+  uniqueQueries: number;
 }

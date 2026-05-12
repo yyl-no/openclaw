@@ -146,7 +146,7 @@
 
 **详细计划**：见 `1-plan.md` §方案 H 执行计划。
 
-**执行记录**（逐条累积，按时间顺序）：
+**执行记录**：
 
 - ✅ **A1**（2026-05-12）：抽取 `appendMemoryFileSafe` 公共原语 + 导出 `formatDateStampInTimezone`
   - 新文件：`extensions/memory-core/src/memory/memory-append-safe.ts`（204 行）
@@ -173,7 +173,21 @@
   - 删去 ID 解析/readFile 冗余逻辑（-33行）
   - 类型：TS2416 消除
 
-- ⏳ **A3**：调用方收敛（`tools.ts::queueShortTermRecallTracking` → `manager.recordRecall(refs)`、`dreaming.ts::L601` → `manager.promote(ids)`）
+- ⏳ **A3**：调用方收敛（`tools.ts::queueShortTermRecallTracking` → `manager.recordRecall(refs)`、`dreaming.ts::L575-611` → `manager.rankPromotionCandidates(opts)` + `manager.applyPromotions(opts)`）
+
+- ⚠️ **发现问题（2）**（2026-05-12）：执行 A3 前发现 `promote(ids: string[])` 签名也不完整——manager 内部硬编码默认阈值（DEFAULT_PROMOTION_MIN_SCORE 等），会导致 milvus 后端丢失 dreaming 的用户配置阈值（minScore/minRecallCount/maxAgeDays/recencyHalfLifeDays…）。接口签名 `promote(ids)` 没有阈值传递通道。
+
+- 🔧 **决策**（2026-05-12，方式3）：拆 `promote` 为 `rankPromotionCandidates(opts)` + `applyPromotions(opts)` 两方法，与现有两阶段链路同构。阈值由调用方显式传入。执行顺序：A4补 → A2补 → A3。
+
+- ✅ **A4 补**（2026-05-12）：接口 `promote` 拆分为两方法 + 新增 SDK `PromotionCandidate` 类型
+  - `packages/memory-host-sdk/src/host/types.ts`：`promote(ids)` → `rankPromotionCandidates(opts)` + `applyPromotions(opts)`，新增 `export interface PromotionCandidate { id, snippet, score, recallCount, uniqueQueries }`
+  - `packages/memory-host-sdk/src/engine-storage.ts`：导出 `PromotionCandidate`
+  - `src/plugin-sdk/memory-core-host-engine-storage.ts`：re-export `PromotionCandidate`
+
+- ✅ **A2 补**（2026-05-12）：`manager.promote(ids)` → `rankPromotionCandidates` + `applyPromotions` 两方法
+  - `rankPromotionCandidates(opts)`：透传参数到 `rankShortTermPromotionCandidates`，返回 SDK `PromotionCandidate[]`
+  - `applyPromotions(opts)`：SDK 候选 ID 反解析 → 内部格式 → `applyShortTermPromotions` → 结果映射回 SDK 类型
+  - 删去 `includePromoted:true` 硬编码和 ID filter 逻辑（-34行 → +95行），无新增 tsgo 错误
 
 
 ---
