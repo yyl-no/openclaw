@@ -39,6 +39,8 @@ import {
   repairShortTermPromotionArtifacts,
   rankShortTermPromotionCandidates,
 } from "./short-term-promotion.js";
+import { MemoryIndexManager } from "./memory/manager.js";
+import type { PromotionCandidate } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 60_000;
 const STARTUP_CRON_RETRY_DELAY_MS = 5_000;
@@ -572,16 +574,33 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
         );
         reportLines.push(`- Repaired recall artifacts: ${formatRepairSummary(repair)}.`);
       }
-      const candidates = await rankShortTermPromotionCandidates({
-        workspaceDir,
-        limit: params.config.limit,
-        minScore: params.config.minScore,
-        minRecallCount: params.config.minRecallCount,
-        minUniqueQueries: params.config.minUniqueQueries,
-        recencyHalfLifeDays,
-        maxAgeDays: params.config.maxAgeDays,
-        nowMs: sweepNowMs,
-      });
+      const candidates = await (async () => {
+        const manager = params.cfg
+          ? await MemoryIndexManager.get({ cfg: params.cfg, agentId: "main" })
+          : null;
+        if (manager) {
+          return manager.rankPromotionCandidates({
+            limit: params.config.limit,
+            minScore: params.config.minScore,
+            minRecallCount: params.config.minRecallCount,
+            minUniqueQueries: params.config.minUniqueQueries,
+            recencyHalfLifeDays,
+            maxAgeDays: params.config.maxAgeDays,
+            nowMs: sweepNowMs,
+          });
+        }
+        // Fallback: direct call for when manager is unavailable.
+        return (await rankShortTermPromotionCandidates({
+          workspaceDir,
+          limit: params.config.limit,
+          minScore: params.config.minScore,
+          minRecallCount: params.config.minRecallCount,
+          minUniqueQueries: params.config.minUniqueQueries,
+          recencyHalfLifeDays,
+          maxAgeDays: params.config.maxAgeDays,
+          nowMs: sweepNowMs,
+        })) as unknown as PromotionCandidate[];
+      })();
       totalCandidates += candidates.length;
       reportLines.push(`- Ranked ${candidates.length} candidate(s) for durable promotion.`);
       if (params.config.verboseLogging) {
@@ -590,7 +609,7 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
             ? candidates
                 .map(
                   (candidate) =>
-                    `${candidate.path}:${candidate.startLine}-${candidate.endLine} score=${candidate.score.toFixed(3)} recalls=${candidate.recallCount} queries=${candidate.uniqueQueries} components={freq=${candidate.components.frequency.toFixed(3)},rel=${candidate.components.relevance.toFixed(3)},div=${candidate.components.diversity.toFixed(3)},rec=${candidate.components.recency.toFixed(3)},cons=${candidate.components.consolidation.toFixed(3)},concept=${candidate.components.conceptual.toFixed(3)}}`,
+                    `${candidate.id} score=${candidate.score.toFixed(3)} recalls=${candidate.recallCount} queries=${candidate.uniqueQueries}`,
                 )
                 .join(" | ")
             : "none";
@@ -598,17 +617,46 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
           `memory-core: dreaming candidate details [workspace=${workspaceDir}] ${candidateSummary}`,
         );
       }
-      const applied = await applyShortTermPromotions({
-        workspaceDir,
-        candidates,
-        limit: params.config.limit,
-        minScore: params.config.minScore,
-        minRecallCount: params.config.minRecallCount,
-        minUniqueQueries: params.config.minUniqueQueries,
-        maxAgeDays: params.config.maxAgeDays,
-        timezone: params.config.timezone,
-        nowMs: sweepNowMs,
-      });
+      const applied = await (async () => {
+        const manager = params.cfg
+          ? await MemoryIndexManager.get({ cfg: params.cfg, agentId: "main" })
+          : null;
+        if (manager) {
+          const result = await manager.applyPromotions({
+            candidates,
+            limit: params.config.limit,
+            minScore: params.config.minScore,
+            minRecallCount: params.config.minRecallCount,
+            minUniqueQueries: params.config.minUniqueQueries,
+            maxAgeDays: params.config.maxAgeDays,
+            timezone: params.config.timezone,
+            nowMs: sweepNowMs,
+          });
+          return result;
+        }
+        // Fallback: direct call for when manager is unavailable.
+        const fallbackResult = await applyShortTermPromotions({
+          workspaceDir,
+          candidates: candidates as any,
+          limit: params.config.limit,
+          minScore: params.config.minScore,
+          minRecallCount: params.config.minRecallCount,
+          minUniqueQueries: params.config.minUniqueQueries,
+          maxAgeDays: params.config.maxAgeDays,
+          timezone: params.config.timezone,
+          nowMs: sweepNowMs,
+        });
+        return {
+          applied: fallbackResult.applied,
+          appliedCandidates: fallbackResult.appliedCandidates.map((ac) => ({
+            id: `file:${ac.path}:${ac.startLine}:${ac.endLine}`,
+            snippet: ac.snippet,
+            score: ac.score,
+            recallCount: ac.recallCount,
+            uniqueQueries: ac.uniqueQueries,
+          })),
+        };
+      })();
       totalApplied += applied.applied;
       reportLines.push(`- Promoted ${applied.applied} candidate(s) into MEMORY.md.`);
       if (params.config.verboseLogging) {
@@ -617,7 +665,7 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
             ? applied.appliedCandidates
                 .map(
                   (candidate) =>
-                    `${candidate.path}:${candidate.startLine}-${candidate.endLine} score=${candidate.score.toFixed(3)} recalls=${candidate.recallCount}`,
+                    `${candidate.id} score=${candidate.score.toFixed(3)} recalls=${candidate.recallCount}`,
                 )
                 .join(" | ")
             : "none";
@@ -636,8 +684,8 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
       if (params.subagent && (candidates.length > 0 || applied.applied > 0)) {
         const data: NarrativePhaseData = {
           phase: "deep",
-          snippets: candidates.map((c) => c.snippet).filter(Boolean),
-          promotions: applied.appliedCandidates.map((c) => c.snippet).filter(Boolean),
+          snippets: candidates.map((c) => c.snippet).filter(Boolean) as string[],
+          promotions: applied.appliedCandidates.map((c) => c.snippet).filter(Boolean) as string[],
         };
         if (detachNarratives) {
           runDetachedDreamNarrative({

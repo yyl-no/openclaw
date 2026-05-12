@@ -136,7 +136,7 @@
 
 ---
 
-### 补充任务 H-A: Task 3/4 遗留填充 ⏳ 进行中
+### 补充任务 H-A: Task 3/4 遗留填充 ✅ 完成
 
 **日期**：计划定稿 2026-05-12，A1 完成 2026-05-12
 
@@ -173,8 +173,6 @@
   - 删去 ID 解析/readFile 冗余逻辑（-33行）
   - 类型：TS2416 消除
 
-- ⏳ **A3**：调用方收敛（`tools.ts::queueShortTermRecallTracking` → `manager.recordRecall(refs)`、`dreaming.ts::L575-611` → `manager.rankPromotionCandidates(opts)` + `manager.applyPromotions(opts)`）
-
 - ⚠️ **发现问题（2）**（2026-05-12）：执行 A3 前发现 `promote(ids: string[])` 签名也不完整——manager 内部硬编码默认阈值（DEFAULT_PROMOTION_MIN_SCORE 等），会导致 milvus 后端丢失 dreaming 的用户配置阈值（minScore/minRecallCount/maxAgeDays/recencyHalfLifeDays…）。接口签名 `promote(ids)` 没有阈值传递通道。
 
 - 🔧 **决策**（2026-05-12，方式3）：拆 `promote` 为 `rankPromotionCandidates(opts)` + `applyPromotions(opts)` 两方法，与现有两阶段链路同构。阈值由调用方显式传入。执行顺序：A4补 → A2补 → A3。
@@ -188,6 +186,13 @@
   - `rankPromotionCandidates(opts)`：透传参数到 `rankShortTermPromotionCandidates`，返回 SDK `PromotionCandidate[]`
   - `applyPromotions(opts)`：SDK 候选 ID 反解析 → 内部格式 → `applyShortTermPromotions` → 结果映射回 SDK 类型
   - 删去 `includePromoted:true` 硬编码和 ID filter 逻辑（-34行 → +95行），无新增 tsgo 错误
+
+- ✅ **A3**（2026-05-12）：调用方收敛完成
+  - `tools.ts`：`queueShortTermRecallTracking` → 接受 `recordRecall` 函数参数，调 `manager.recordRecall(refs, context?)`，删去直调 `recordShortTermRecalls`；`MemorySearchManager` 加过渡 `recordRecall?` 方法
+  - `dreaming.ts`：L575-611 `rankShortTermPromotionCandidates` + `applyShortTermPromotions` → `manager.rankPromotionCandidates(opts)` + `manager.applyPromotions(opts)`，保留 fallback 兜底路径；verbose log 改用 `candidate.id` 替代 `path:startLine:endLine`
+  - 唯一遗留错误：既有 TS2322 `MemorySearchResult[]` vs `MemoryReference[]`（非 H-A 引入）
+
+**H-A 完成状态**：8 文件改动，无新增 tsgo 错误。管理端三方法 + 调用方收敛完毕，AI flush turn 仍走老路径（H-B 处理）。
 
 
 ---

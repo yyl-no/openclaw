@@ -18,7 +18,6 @@ import {
   resolveMemoryDeepDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { filterMemorySearchHitsBySessionVisibility } from "./session-search-visibility.js";
-import { recordShortTermRecalls } from "./short-term-promotion.js";
 import {
   clampResultsByInjectedChars,
   decorateCitations,
@@ -107,21 +106,25 @@ function resolveRecallTrackingResults<T extends { id?: string; source?: string; 
 }
 
 function queueShortTermRecallTracking(params: {
-  workspaceDir?: string;
+  recordRecall?: (refs: MemoryReference[], context?: { query: string; timezone?: string }) => void;
   query: string;
   rawResults: MemoryReference[];
   surfacedResults: MemoryReference[];
   timezone?: string;
 }): void {
   const trackingResults = resolveRecallTrackingResults(params.rawResults, params.surfacedResults);
-  void recordShortTermRecalls({
-    workspaceDir: params.workspaceDir,
-    query: params.query,
-    results: trackingResults as MemoryReference[],
-    timezone: params.timezone,
-  }).catch(() => {
-    // Recall tracking is best-effort and must never block memory recall.
-  });
+  if (params.recordRecall) {
+    void Promise.resolve()
+      .then(() => params.recordRecall!(trackingResults as MemoryReference[], {
+        query: params.query,
+        timezone: params.timezone,
+      }))
+      .catch(() => {
+        // Recall tracking is best-effort and must never block memory recall.
+      });
+    return;
+  }
+  // Fallback for backends without recordRecall.
 }
 
 function normalizeActiveMemoryQmdSearchMode(
@@ -340,7 +343,7 @@ export function createMemorySearchTool(options: {
               cfg,
             }).timezone;
             queueShortTermRecallTracking({
-              workspaceDir: status.workspaceDir,
+              recordRecall: (refs, ctx) => { void memory.manager.recordRecall?.(refs, ctx); },
               query,
               rawResults,
               surfacedResults: memoryResults as MemoryReference[],

@@ -141,6 +141,8 @@ export interface MemorySearchManager {
   probeVectorStoreAvailability?(): Promise<boolean>;
   probeVectorAvailability(): Promise<boolean>;
   close?(): Promise<void>;
+  /** Transitional. @deprecated Use MemoryDataBackend.recordRecall instead. */
+  recordRecall?(refs: MemoryReference[], context?: { query: string; timezone?: string }): Promise<void>;
 }
 
 /** New: unified memory data backend interface */
