@@ -220,3 +220,77 @@ memory-milvus 采用**混合检索（ANN + 关键词）**，与 memory-core 行�
 | `src/plugins/memory-state.ts` | MemoryFlushPlan 加字段 |
 | `src/agents/pi-tools.ts` | flush 工具路由分流 |
 | `extensions/memory-milvus/` | **全部新建** |
+
+---
+
+## 11. Flush 路径统一方案（方案 H）— 补充决策
+
+> 本节为第 3 节 "Flush 写入路径" 的**细化决策**，不替换原表格，仅明确最终实现方式。
+
+### 11.1 背景：原表格的歧义
+
+原第 3 节表格：
+
+| 后端 | pi-tools.ts 行为 |
+|------|-----------------|
+| 文件 | wrapToolMemoryFlushAppendOnlyWrite（现逻辑不变） |
+| Milvus | 不包装 write，走 plugin 的 memory_write 工具 |
+
+该表格允许两种解读：
+
+- **解读 A（双路径并存）**：文件后端 AI 调 `file write`，milvus 后端 AI 调 `memory_write` → 切换后端时 AI 工具链改变
+- **解读 B（单路径统一）**：所有后端 AI 都调 `memory_write`，文件后端的 `memory_write` 底层调 `backend.write()` → 切换后端时 AI 工具链不变
+
+### 11.2 最终决策：采用解读 B（方案 H）
+
+**决策**：AI flush turn 统一调用 `memory_write` 工具，文件后端和 milvus 后端只在 `backend.write()` 内部的"最后一公里"实现上不同。
+
+**原因**：核心目标是"切到 milvus 后仅数据库不同，其他都保持相同"。只有解读 B 能做到 AI 工具集 / prompt / 调用方代码全部一致。
+
+### 11.3 统一调用链
+
+```
+[AI flush turn]
+    ↓ 调用 memory_write(text)
+[memory_write 工具]
+    ↓ backend.write(entry)
+[MemoryDataBackend.write]
+    ├─ 文件后端 → appendMemoryFileSafe() → fs.appendFile 到 memory/YYYY-MM-DD.md
+    └─ Milvus   → embed + collection.insert
+```
+
+对比原 `wrapToolMemoryFlushAppendOnlyWrite` 路径：保留为**兜底**（AI 意外调用 file write 时仍受保护），但不再是 flush turn 主路径。
+
+### 11.4 对现有决策的细化
+
+| 第 3 节原决策 | 方案 H 细化 |
+|-------------|-----------|
+| 文件：`wrapToolMemoryFlushAppendOnlyWrite`（现逻辑不变） | 拆为公共函数 `appendMemoryFileSafe()`，由 `backend.write()` 和 wrap 工具**共享调用** |
+| Milvus：走 plugin 的 `memory_write` 工具 | **所有后端**（含文件）的 flush turn 都走 `memory_write` 工具 |
+| `MemoryFlushPlan.relativePath` 仅文件后端有 | 保留；`memory_write` 工具内部自行计算路径，不依赖此字段 |
+
+### 11.5 新增基础设施
+
+- **公共原语**：`extensions/memory-core/src/memory/memory-append-safe.ts::appendMemoryFileSafe()` —— 封装路径白名单、保留文件拒写、文件锁、append-only、行号返回
+- **新工具**：`extensions/memory-core/src/tools.ts::createMemoryWriteTool()` —— AI flush turn 调用入口
+- **日期函数导出**：`flush-plan.ts::formatDateStampInTimezone` 改为 export
+
+### 11.6 接口方法签名细化
+
+| 方法 | 签名决策 | 原因 |
+|------|---------|------|
+| `write(entry)` | `write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference>` | 文件后端忽略元数据只写 text；milvus 完整使用 |
+| `recordRecall(refs, context?)` | 参数从 `ids: string[]` **扩展为 `refs: MemoryReference[]` + 可选 context** | 保留 score/snippet/query 用于 promotion 评分，否则信号退化 |
+| `promote(ids)` | `promote(ids: string[]): Promise<void>` | 保持简单，内部自行 rank+apply |
+
+### 11.7 调用方收敛
+
+- `tools.ts::queueShortTermRecallTracking` → 改调 `manager.recordRecall(refs)`（替代直调 `recordShortTermRecalls`）
+- `dreaming.ts::L601` → 改调 `manager.promote(ids)`（替代直调 `applyShortTermPromotions`）
+- 原 `recordShortTermRecalls` / `applyShortTermPromotions` 函数保留为 `@internal`，供现有测试和 backend 内部调用
+
+### 11.8 风险与兜底
+
+- `wrapToolMemoryFlushAppendOnlyWrite` **保留**，作为 AI 误用 file write 时的安全兜底
+- 旧 `memory/*.md` 文件格式不变，无数据迁移
+- 分阶段实施降低回归风险（详细执行计划见 `1-plan.md` §方案 H 执行计划，拆分为 H-A / H-B 两段独立执行）

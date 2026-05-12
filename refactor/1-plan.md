@@ -97,7 +97,100 @@ type MemoryFlushPlan = {
 | 文件 | `{ relativePath, backendKind:"file" }` | wrapToolMemoryFlushAppendOnlyWrite（现逻辑不变） |
 | Milvus | `{ backendKind:"milvus" }` | 不包装 write，走 plugin 的 memory_write 工具 |
 
+> **[补充决策 2026-05-12]** 上表的"pi-tools.ts 行为"细化为**方案 H（统一 memory_write 工具）**：所有后端的 AI flush turn 均调用 `memory_write` 工具，文件后端和 milvus 后端仅在 `backend.write()` 内部实现不同。详见 `2-decisions.md` §11。
+>
+> 此细化连带影响 Task 3/4 的实现方式：
+> - Task 3 的 `write/recordRecall/promote` 三方法通过公共原语 `appendMemoryFileSafe()` 和薄封装实现
+> - Task 4 新增 `memory_write` 工具与 `memory-append-safe.ts` 两个文件
+> - `recordRecall` 签名扩展为 `(refs: MemoryReference[], context?)` 以保留评分信号
+> - 完整执行计划（含 H-A / H-B 拆分、阶段表、验证点）见本文件 §方案 H 执行计划
+
 ---
+
+## 方案 H 执行计划（Task 3/4 遗留补丁 + Task 6 修订）
+
+> 本节为方案 H 的完整执行计划，对应 `2-decisions.md` §11。
+> 拆分为 **H-A**（Task 3/4 遗留填充）和 **H-B**（Task 6 修订）两段独立执行，降低回归风险。
+
+### 总目标
+
+切到 milvus 后端后，除 `backend.write()` / `backend.search()` 内部实现外，所有代码路径、AI 工具、prompt 完全相同。
+
+### 决策要点（已确认）
+
+- `recordRecall` 签名扩展为 `(refs: MemoryReference[], context?)`，保留评分信号
+- 原 `recordShortTermRecalls` / `applyShortTermPromotions` 函数保留为 `@internal`，供既有测试与 backend 内部调用，不删除
+- H-A 和 H-B 独立提交，H-B 延后执行
+
+---
+
+### H-A：Task 3/4 遗留填充（先执行）
+
+**作用域**：填充三个空壳方法与内部调用方收敛，**不动 Task 6 的 flush turn 工具路径**。
+
+| 阶段 | 任务 | 改动位置 |
+|------|------|---------|
+| A1 | 抽取公共落盘原语 `appendMemoryFileSafe` + 导出日期函数 | `extensions/memory-core/src/memory/memory-append-safe.ts`（新）+ `flush-plan.ts`（`formatDateStampInTimezone` 改 export） |
+| A2 | 实现 `manager.write()`（调 A1 原语）、`recordRecall(refs, context?)`（薄封装 `recordShortTermRecalls`）、`promote(ids)`（薄封装 `rankShortTermPromotionCandidates` + `applyShortTermPromotions`） | `extensions/memory-core/src/memory/manager.ts` |
+| A3 | 调用方收敛：`queueShortTermRecallTracking` 改调 `manager.recordRecall(refs)`；`dreaming.ts::L601` 改调 `manager.promote(ids)` | `extensions/memory-core/src/tools.ts`、`extensions/memory-core/src/dreaming.ts` |
+| A4 | 接口签名扩展落地：`MemoryDataBackend.recordRecall(refs, context?)` | `packages/memory-host-sdk/.../types.ts` |
+
+**改动规模**：~5 文件，~150 行代码。
+
+**验证**：
+- `pnpm tsgo`：类型通过
+- 既有 `short-term-promotion.test.ts` / `memory-events.test.ts` / `dreaming` 相关测试全绿
+- 新增 `manager-write.test.ts`：验证 write → 下一次 sync 后可 search 命中
+- 新增 `memory-append-safe.test.ts`：验证路径白名单、保留文件拒写、并发 append 行号不错乱
+
+**不做**：
+- ❌ 不新增 `memory_write` 工具（归 H-B）
+- ❌ 不改 flush prompt（归 H-B）
+- ❌ 不改 `src/pi-tools.ts` 的 flush 分流（归 H-B）
+- ❌ 不动 `wrapToolMemoryFlushAppendOnlyWrite`（归 H-B）
+
+**完成后效果**：`manager.write()` 文件后端版可用但暂无调用方（只为 milvus 对接准备），AI flush turn 仍走老路径。这是**为 Task 10 / Part 2 准备的过渡态**，属于可接受的技术债。
+
+---
+
+### H-B：Task 6 修订（延后执行）
+
+**作用域**：改造 flush turn 让所有后端 AI 都走 `memory_write` 工具，彻底消除双路径。
+
+| 阶段 | 任务 | 改动位置 |
+|------|------|---------|
+| B1 | 新增 `memory_write` 工具 + schema + capability 注册 | `extensions/memory-core/src/tools.shared.ts`、`extensions/memory-core/src/tools.ts`、`extensions/memory-core/src/index.ts` |
+| B2 | flush prompt 改写：引导 AI 调 `memory_write` 而非写文件 | `extensions/memory-core/src/flush-plan.ts` |
+| B3 | pi-tools 工具白名单切换：flush turn 暴露 `memory_write`，`wrapToolMemoryFlushAppendOnlyWrite` 降级为兜底 | `src/agents/pi-tools.ts` |
+
+**改动规模**：~5 文件，~200 行代码。
+
+**风险点**（比 H-A 高）：
+- AI 行为回归：AI 需识别新 `memory_write` 工具，可能需多轮 prompt 校准
+- 跨仓修改（`src/`），涉及 flush turn 主路径
+- 需独立提交 + 手工验证 flush turn 端到端
+
+**执行时机选项**：
+- **选项 α**：Part 2 开始前（Task 7 之前）独立执行
+- **选项 β**：与 Task 10（milvus 重写 flush/capture）合并执行——Task 10 本来就要新增 `memory_write`，一起做最省事
+
+**推荐**：选项 β。H-B 延后到 Task 10 一并处理，避免短期内重复改动 pi-tools。
+
+---
+
+### 保留不删项
+
+| 函数 / 路径 | 保留原因 |
+|------------|---------|
+| `recordShortTermRecalls` | 被既有测试和 H-A 后的 manager 内部调用 |
+| `applyShortTermPromotions` | 被既有 dreaming 测试和 H-A 后的 manager 内部调用 |
+| `wrapToolMemoryFlushAppendOnlyWrite` | 即使 H-B 完成，也保留为兜底防 AI 误用 file write |
+| `memory/*.md` 文件格式 | 不变，无数据迁移 |
+
+---
+
+
+
 
 ## 第二部分：memory-milvus 实现
 

@@ -136,6 +136,31 @@
 
 ---
 
+### 补充任务 H-A: Task 3/4 遗留填充 ⏳ 进行中
+
+**日期**：计划定稿 2026-05-12，A1 完成 2026-05-12
+
+**背景**：Task 3/4 虽已标记 ✅ 完成，但 `manager.write/recordRecall/promote` 三方法实际仍是空壳。经讨论确定采用**方案 H** 填充，拆分为 H-A / H-B 两阶段执行，本条为 H-A。
+
+**执行范围**：仅填充 Task 3/4 三个空壳方法 + 内部调用方收敛，**不改动已 ✅ 完成的 Task 6**（flush turn 工具路径）。
+
+**详细计划**：见 `1-plan.md` §方案 H 执行计划。
+
+**执行状态**：
+- ✅ A1：抽取 `appendMemoryFileSafe` 公共原语 + 导出 `formatDateStampInTimezone`（2026-05-12）
+  - 新文件：`extensions/memory-core/src/memory/memory-append-safe.ts`（204 行）
+  - 修改：`extensions/memory-core/src/flush-plan.ts`（`formatDateStampInTimezone` 改 export）
+  - 导出：`appendMemoryFileSafe()`、`resolveDailyMemoryRelativePath()`、`RESERVED_MEMORY_FILES`
+  - 特性：路径白名单（`memory/YYYY-MM-DD.md`）、保留文件拒写、per-path 并发锁、append-only、返回 1-based 行号区间
+  - 类型：`tsgo` 验证两处改动无新增错误
+- ⏳ A2：实现 `manager.write/recordRecall/promote` 三方法
+- ⏳ A3：调用方收敛（`tools.ts::queueShortTermRecallTracking`、`dreaming.ts::L601`）
+- ⏳ A4：接口签名扩展 `recordRecall(refs, context?)`
+
+
+---
+
 ## 第二部分：memory-milvus 实现
 
 尚未开始。
+
