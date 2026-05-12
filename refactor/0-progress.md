@@ -385,3 +385,28 @@
 - `MilvusSearchManager.status().custom.degraded` 上报供上层/UI 感知
 - 后续 S3/S4 的 fallback/write 路径会先检查 `degraded` 决定是否走 ndjson 兜底
 
+---
+
+### Task 10-S3: Fallback 基础设施 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task10-S3 + `2-decisions.md` §12.5
+
+**改动文件**：
+
+| 文件 | 改动 |
+|------|------|
+| `extensions/memory-milvus/src/fallback.ts`（新建，275行） | `writeFallback(workspaceDir, entry)` — 序列化 `Omit<MemoryEntry, "id">` 为 JSON 追加到 `memory/.milvus-fallback/YYYY-MM-DD.ndjson`；`replayFallback(workspaceDir, writer)` — 遍历目录待处理文件，逐条 `writer(entry)` 回放，成功条目移除（重写文件），失败条目保留；`pendingFallbackCount(workspaceDir)` — 统计剩余条目总数供 `status()` 上报。全部写入/回放操作持有 in-process 文件锁，防止并发交错 |
+| `extensions/memory-milvus/src/fallback.test.ts`（新建，269行） | 7 个单测用例：覆盖写入→全部回放成功→文件清空、写入→部分失败→失败条目保留+第二轮补放成功、空目录不抛错、10条并发写入无交错、无效JSON行被丢弃、元数据字段保真 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 3 files, 43 tests passed（types 28 + bootstrap 8 + fallback 7）
+- `pnpm build` → 全绿
+
+**关键设计**：
+- `FALLBACK_DIR = "memory/.milvus-fallback"` 独立于 file backend 主目录
+- `FallbackEntry = Omit<MemoryEntry, "id">` — 不含 id，Milvus 自增主键
+- `withFileLock` — 复用 `memory-append-safe.ts` 的 in-process lock 模式
+- `deserializeEntry` — 宽松解析，无效行直接丢弃，缺失字段补默认值
+- `replaySingleFile` — 按文件批处理：全部回放→重写文件仅保留失败条目→文件变空则删除
