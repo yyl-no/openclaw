@@ -569,7 +569,7 @@
 
 | 项目 | 说明 | 目标 |
 |------|------|------|
-| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step2 完成（工具层），待 Step3-4 | Task 11 |
+| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step3 完成（plugin 注册），待 Step4 全量回归 | Task 11 |
 | `recordRecall` 正式实现 | 当前仅 console.warn 占位 | Task 12 |
 | Dreaming promotion（短→长） | Task 13，Alpha 退出条件 | memory-milvus |
 | live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
@@ -608,8 +608,27 @@
 |------|------|
 | Step 1 Schema+Manager | ✅ |
 | Step 2 工具层 | ✅ |
-| Step 3 Plugin 注册 | ⬜ |
+| Step 3 Plugin 注册 | ✅ |
 | Step 4 全量回归 | ⬜ |
+
+### Task 11 Step 3: Plugin 注册集成 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task11 Step3 + `2-decisions.md` §13.4（方案 Y 单层信赖 slots.ts）
+
+**改动文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `extensions/memory-milvus/index.ts` | +`createMemorySearchTool` / `createMemoryGetTool` import；`register()` 内无条件追加 `memory_search` / `memory_get` 注册（factory + names）；删除 L246 占位注释 |
+| `extensions/memory-core/index.ts` | **不动**（slots.ts 已保障互斥） |
+| `extensions/memory-milvus/src/register.test.ts`（新建） | 2 tests：断言 `registerTool` 被调用 3 次 + names 依次为 `["memory_write"]` / `["memory_search"]` / `["memory_get"]`；`registerMemoryCapability` 也被调用 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 8 files, **90 tests** passed（88→90，+2）
+- `pnpm tsgo:extensions` → memory-milvus **0 错误**
+- `pnpm build` → 全绿
 
 ### Task 11 Step 2: 工具层（memory_search / memory_get）✅ 完成
 

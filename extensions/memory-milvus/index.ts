@@ -29,6 +29,8 @@ import {
 } from "./src/search.js";
 import { ensureCollectionReady } from "./src/collection-bootstrap.js";
 import { createMemoryWriteTool } from "./src/tools.js";
+import { createMemorySearchTool } from "./src/tools.search.js";
+import { createMemoryGetTool } from "./src/tools.get.js";
 
 // ── Prompt Builder ─────────────────────────────────────────────────
 
@@ -243,6 +245,14 @@ export default definePluginEntry({
       names: ["memory_write"],
     });
 
-    // memory_search / memory_get 工具由 Task 11 注册
+    // memory_search 工具：Milvus ANN + BM25 混合检索
+    api.registerTool(() => createMemorySearchTool({ getManager: () => activeManager }), {
+      names: ["memory_search"],
+    });
+
+    // memory_get 工具：按 id 查询 PK → MemoryEntry
+    api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), {
+      names: ["memory_get"],
+    });
   },
 });
