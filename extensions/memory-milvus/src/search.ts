@@ -18,6 +18,7 @@ import type {
   MemoryReadResult,
   MemoryReference,
   MemorySearchRuntimeDebug,
+  PromotionCandidate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   FIELD_AGENT_ID,
@@ -105,6 +106,47 @@ function buildKeywordFilter(keywords: string[], agentId?: string): string {
   return parts.join(" && ");
 }
 
+/**
+ * Build a Milvus scalar filter expression from structured filter options.
+ * Used for agentId / sessionKey / memoryType / createdAfter filtering.
+ * Returns "" if no filters are specified.
+ */
+function buildScalarFilter(opts: {
+  agentId?: string;
+  sessionKey?: string;
+  memoryType?: string;
+  createdAfter?: string;
+}): string {
+  const parts: string[] = [];
+
+  if (opts.agentId) {
+    parts.push(`${FIELD_AGENT_ID} == "${opts.agentId.replace(/"/g, '\\"')}"`);
+  }
+  if (opts.sessionKey) {
+    parts.push(`${FIELD_SESSION_KEY} == "${opts.sessionKey.replace(/"/g, '\\"')}"`);
+  }
+  if (opts.memoryType) {
+    parts.push(`${FIELD_MEMORY_TYPE} == "${opts.memoryType.replace(/"/g, '\\"')}"`);
+  }
+  if (opts.createdAfter) {
+    parts.push(`${FIELD_CREATED_AT} >= "${opts.createdAfter.replace(/"/g, '\\"')}"`);
+  }
+
+  return parts.join(" && ");
+}
+
+/**
+ * Combine two Milvus filter expressions with AND.
+ * Returns the non-empty filter if one is empty, or the AND combination.
+ * Returns "" if both are empty.
+ */
+function combineFilters(a: string, b?: string): string {
+  const aNorm = a.trim();
+  const bNorm = b?.trim() ?? "";
+  if (aNorm && bNorm) return `(${aNorm}) && (${bNorm})`;
+  return aNorm || bNorm;
+}
+
 // ── TF-IDF ────────────────────────────────────────────────────────
 
 /**
@@ -185,6 +227,39 @@ function temporalDecayFactor(createdAt: string, halfLifeDays = 30): number {
   if (ageDays <= 0) return 1;
   // 半衰期衰减：2^(-age/halfLife)
   return Math.pow(2, -ageDays / halfLifeDays);
+}
+
+/**
+ * Compute promotion score for deep dreaming candidate ranking.
+ *
+ * Score = normalizedRecall × recencyDecay
+ * - normalizedRecall = min(recallCount / 10, 1.0)
+ * - recencyDecay uses lastRecalledAt (fallback to createdAt) with half-life
+ */
+function computePromotionScore(params: {
+  recallCount: number;
+  createdAt: string;
+  lastRecalledAt: string;
+  recencyHalfLifeDays: number;
+  nowMs: number;
+}): number {
+  const { recallCount, createdAt, lastRecalledAt, recencyHalfLifeDays, nowMs } = params;
+
+  // Normalize recall count to 0-1 (10+ recalls = full score)
+  const normalizedRecall = Math.min(recallCount / 10, 1.0);
+
+  // Recency: prefer lastRecalledAt, fallback to createdAt
+  const recencyRef = lastRecalledAt || createdAt;
+  if (!recencyRef) return normalizedRecall;
+
+  const refMs = Date.parse(recencyRef);
+  if (Number.isNaN(refMs)) return normalizedRecall;
+
+  const ageDays = (nowMs - refMs) / (1000 * 60 * 60 * 24);
+  if (ageDays <= 0) return normalizedRecall;
+
+  const decay = Math.pow(2, -ageDays / Math.max(1, recencyHalfLifeDays));
+  return normalizedRecall * decay;
 }
 
 // ── MMR（最大边际相关性）───────────────────────────────────────────
@@ -268,6 +343,10 @@ export class MilvusSearchManager {
       minScore?: number;
       sessionKey?: string;
       agentId?: string;
+      /** Filter by memory_type (e.g. "short_term", "long_term", "archived") */
+      memoryType?: string;
+      /** Filter by created_at >= this ISO timestamp */
+      createdAfter?: string;
       qmdSearchModeOverride?: "query" | "search" | "vsearch";
       onDebug?: (debug: MemorySearchRuntimeDebug) => void;
     },
@@ -282,9 +361,23 @@ export class MilvusSearchManager {
     const effectiveAgentId = opts?.agentId ?? this.agentId;
     const fetchLimit = Math.max(maxResults * VECTOR_FETCH_MULTIPLIER, 20);
 
+    // Build scalar filter for agent / memoryType / createdAfter
+    const scalarFilter = buildScalarFilter({
+      agentId: effectiveAgentId,
+      sessionKey: opts?.sessionKey,
+      memoryType: opts?.memoryType,
+      createdAfter: opts?.createdAfter,
+    });
+
     // 清理查询文本
     const cleaned = query.trim();
-    if (!cleaned) return [];
+
+    // Empty query with scalar filters → pure query (no semantic search)
+    if (!cleaned) {
+      if (!scalarFilter) return [];
+      const refs = await this.queryByFilter(scalarFilter, fetchLimit);
+      return refs.filter((r) => r.score >= minScore).slice(0, maxResults);
+    }
 
     // 1. 向量 ANN 搜索
     let vectorRefs: MemoryReference[] = [];
@@ -292,7 +385,7 @@ export class MilvusSearchManager {
       const queryVec = await this.provider.embedQuery(cleaned);
       const hasVector = queryVec.some((v) => v !== 0);
       if (hasVector) {
-        vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit);
+        vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit, scalarFilter);
       }
     } catch (err) {
       // 向量搜索失败不阻断整体搜索
@@ -304,7 +397,7 @@ export class MilvusSearchManager {
     const keywords = extractKeywords(cleaned);
     if (keywords.length > 0) {
       try {
-        keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit);
+        keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit, scalarFilter);
       } catch (err) {
         console.warn("[memory-milvus] keyword search failed:", err);
       }
@@ -333,6 +426,7 @@ export class MilvusSearchManager {
     vector: number[],
     agentId: string,
     limit: number,
+    additionalFilter?: string,
   ): Promise<MemoryReference[]> {
     const request: SearchSimpleReq = {
       collection_name: this.collectionName,
@@ -342,8 +436,15 @@ export class MilvusSearchManager {
       output_fields: [...OUTPUT_FIELDS],
     };
 
-    if (agentId) {
-      request.filter = `${FIELD_AGENT_ID} == "${agentId.replace(/"/g, '\\"')}"`;
+    // When additionalFilter is provided, it already contains the agentId clause.
+    // Otherwise, add agentId filter directly.
+    const filter = additionalFilter
+      ? additionalFilter
+      : agentId
+        ? `${FIELD_AGENT_ID} == "${agentId.replace(/"/g, '\\"')}"`
+        : "";
+    if (filter) {
+      request.filter = filter;
     }
 
     const response = await this.client.search(request);
@@ -366,8 +467,12 @@ export class MilvusSearchManager {
     keywords: string[],
     agentId: string,
     limit: number,
+    additionalFilter?: string,
   ): Promise<MemoryReference[]> {
-    const filter = buildKeywordFilter(keywords, agentId);
+    // When additionalFilter is provided, it already contains the agentId clause.
+    // Build keyword-only filter and combine with additionalFilter.
+    const keywordFilter = buildKeywordFilter(keywords, additionalFilter ? undefined : agentId);
+    const filter = combineFilters(keywordFilter, additionalFilter);
 
     const request: QueryReq = {
       collection_name: this.collectionName,
@@ -395,6 +500,37 @@ export class MilvusSearchManager {
       const ref = rowToMemoryReference(row);
       ref.textScore = tfidfScores.get(ref.id) ?? 0;
       ref.score = ref.textScore;
+      return ref;
+    });
+  }
+
+  // ── 纯标量过滤查询（无语义搜索） ──────────────────────────────
+
+  /**
+   * Query by scalar filter only (no vector search).
+   * Used for data collection phases (light/REM dreaming) where we
+   * need to list all records matching a filter without a search query.
+   */
+  private async queryByFilter(
+    filter: string,
+    limit: number,
+  ): Promise<MemoryReference[]> {
+    const request: QueryReq = {
+      collection_name: this.collectionName,
+      filter,
+      output_fields: [...OUTPUT_FIELDS],
+      limit,
+    };
+
+    const response = await this.client.query(request);
+
+    if (!response.data || response.data.length === 0) {
+      return [];
+    }
+
+    return (response.data as Record<string, unknown>[]).map((row) => {
+      const ref = rowToMemoryReference(row);
+      ref.score = 1; // No semantic score — assign neutral score
       return ref;
     });
   }
@@ -762,6 +898,198 @@ export class MilvusSearchManager {
         `[memory-milvus] recordRecall upsert failed: ${(err as Error).message}`,
       );
     }
+  }
+
+  // ── Promotion（Deep Dreaming） ──────────────────────────────
+
+  /**
+   * Apply promotions: write new long_term entries for each candidate,
+   * then archive (upsert) the original short_term records.
+   *
+   * Per-candidate failure is non-fatal: failed candidates are skipped
+   * with a warning and the loop continues.
+   */
+  async applyPromotions(opts: {
+    candidates: PromotionCandidate[];
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    timezone?: string;
+    nowMs?: number;
+  }): Promise<{ applied: number; appliedCandidates: PromotionCandidate[] }> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) {
+      warnOnce(
+        "milvus:applyPromotions:degraded",
+        "[memory-milvus] applyPromotions skipped: manager is in degraded mode",
+      );
+      return { applied: 0, appliedCandidates: [] };
+    }
+
+    let filtered = opts.candidates;
+    if (opts.minScore != null) {
+      filtered = filtered.filter((c) => c.score >= opts.minScore!);
+    }
+    if (opts.minRecallCount != null) {
+      filtered = filtered.filter((c) => c.recallCount >= opts.minRecallCount!);
+    }
+    if (opts.limit != null && opts.limit > 0) {
+      filtered = filtered.slice(0, opts.limit);
+    }
+
+    if (!filtered.length) return { applied: 0, appliedCandidates: [] };
+
+    const appliedCandidates: PromotionCandidate[] = [];
+
+    for (const candidate of filtered) {
+      try {
+        // 1. Read full original entry
+        const entry = await this.get(candidate.id);
+
+        // 2. Write new long_term entry (re-embed, provenance points to source)
+        await this.insertEntry({
+          text: entry.text,
+          snippet: entry.snippet,
+          agentId: entry.agentId,
+          sessionKey: entry.sessionKey,
+          memoryType: MEMORY_TYPES.LONG_TERM,
+          recallCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          provenance: {
+            kind: "milvus",
+            label: MEMORY_SOURCE_LABELS.RECALL_PROMOTION,
+          },
+        });
+
+        // 3. Archive original short_term (upsert memory_type → archived)
+        const now = new Date().toISOString();
+        await this.client.upsert({
+          collection_name: this.collectionName,
+          data: [{
+            [FIELD_ID]: candidate.id,
+            [FIELD_MEMORY_TYPE]: MEMORY_TYPES.ARCHIVED,
+            [FIELD_UPDATED_AT]: now,
+          }] as unknown as RowData[],
+        });
+
+        appliedCandidates.push(candidate);
+      } catch (err) {
+        warnOnce(
+          `milvus:applyPromotions:candidate-${candidate.id}`,
+          `[memory-milvus] applyPromotions failed for candidate ${candidate.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    return { applied: appliedCandidates.length, appliedCandidates };
+  }
+
+  /**
+   * Rank short_term records as promotion candidates for deep dreaming.
+   *
+   * Scores records by recency-weighted recall frequency.
+   * Only considers short_term records that have been recalled at least once.
+   * `uniqueQueries` uses `recallCount` as a proxy until Task 16's 9-dim signals.
+   */
+  async rankPromotionCandidates(opts: {
+    limit?: number;
+    minScore?: number;
+    minRecallCount?: number;
+    minUniqueQueries?: number;
+    maxAgeDays?: number;
+    recencyHalfLifeDays?: number;
+    nowMs?: number;
+  }): Promise<PromotionCandidate[]> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) {
+      warnOnce(
+        "milvus:rankPromotion:degraded",
+        "[memory-milvus] rankPromotionCandidates skipped: manager is in degraded mode",
+      );
+      return [];
+    }
+
+    const limit = opts.limit ?? 20;
+    const minScore = opts.minScore ?? 0;
+    const minRecallCount = opts.minRecallCount ?? 1;
+    const maxAgeDays = opts.maxAgeDays;
+    const recencyHalfLifeDays = opts.recencyHalfLifeDays ?? 30;
+    const nowMs = opts.nowMs ?? Date.now();
+
+    // Query short_term records for this agent
+    const filter = buildScalarFilter({
+      agentId: this.agentId,
+      memoryType: MEMORY_TYPES.SHORT_TERM,
+    });
+
+    let rows: Record<string, unknown>[] = [];
+    try {
+      const response = await this.client.query({
+        collection_name: this.collectionName,
+        filter,
+        output_fields: [
+          FIELD_ID,
+          FIELD_SNIPPET,
+          FIELD_RECALL_COUNT,
+          FIELD_CREATED_AT,
+          FIELD_LAST_RECALLED_AT,
+        ],
+        limit: 1000,
+      });
+      rows = (response.data ?? []) as Record<string, unknown>[];
+    } catch (err) {
+      warnOnce(
+        "milvus:rankPromotion:query-failed",
+        `[memory-milvus] rankPromotionCandidates query failed: ${(err as Error).message}`,
+      );
+      return [];
+    }
+
+    if (!rows.length) return [];
+
+    const candidates: PromotionCandidate[] = [];
+    for (const row of rows) {
+      const recallCount = Number(row[FIELD_RECALL_COUNT] ?? 0);
+      if (recallCount < minRecallCount) continue;
+
+      const createdAt = String(row[FIELD_CREATED_AT] ?? "");
+      const lastRecalledAt = String(row[FIELD_LAST_RECALLED_AT] ?? "");
+
+      // Age filter
+      if (maxAgeDays != null) {
+        const createdMs = Date.parse(createdAt);
+        if (!Number.isNaN(createdMs)) {
+          const ageDays = (nowMs - createdMs) / (1000 * 60 * 60 * 24);
+          if (ageDays > maxAgeDays) continue;
+        }
+      }
+
+      // Score: recall_count weighted by recency
+      const score = computePromotionScore({
+        recallCount,
+        createdAt,
+        lastRecalledAt,
+        recencyHalfLifeDays,
+        nowMs,
+      });
+
+      if (score < minScore) continue;
+
+      candidates.push({
+        id: String(row[FIELD_ID] ?? ""),
+        snippet: String(row[FIELD_SNIPPET] ?? ""),
+        score,
+        recallCount,
+        uniqueQueries: recallCount, // proxy: Task 16 replaces with real unique query count
+      });
+    }
+
+    // Sort by score desc, apply limit
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates.slice(0, limit);
   }
 
   // ── 状态 ──────────────────────────────────────────────────────

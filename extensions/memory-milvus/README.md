@@ -1,8 +1,5 @@
 # Memory (Milvus)
 
-> **⚠️ Alpha status** — this plugin is under active development.
-> Production use is not recommended until Task 13 completion.
-
 Milvus-backed memory plugin providing vector ANN search for OpenClaw memory.
 
 ## Current capabilities
@@ -10,22 +7,24 @@ Milvus-backed memory plugin providing vector ANN search for OpenClaw memory.
 | Capability | Status |
 |---|---|
 | `memory_write` tool (vector insert with fallback) | ✅ |
+| `memory_search` tool (ANN + keyword hybrid search) | ✅ |
+| `memory_get` tool (PK lookup) | ✅ |
 | Collection auto-bootstrap (create + load) | ✅ |
 | Degraded mode (Milvus unreachable → ndjson fallback) | ✅ |
+| `recordRecall` (recall-count tracking + upsert) | ✅ |
+| Dreaming promotion `rankPromotionCandidates` + `applyPromotions` | ✅ |
 | Source label / memory type validation | ✅ |
 | AI flush turn prompt integration | ✅ |
 
 ## Not yet available
 
-The following are planned for future tasks and are **not functional yet**:
-
 | Capability | Target |
 |---|---|
-| `memory_search` / `memory_get` tools | Task 11 |
-| `recordRecall` (recall-count tracking) | Task 12 |
-| Dreaming promotion (short-term → long-term) | Task 13 |
-| BM25 full-text scalar filter | Task 14 |
+| BM25 native full-text search (Milvus ≥ 2.4) | Task 16 |
 | Dedup / update / delete / versioning | Task 16 |
+| Citation decoration pipeline | Task 16 |
+| Multi-corpus support (sessions / wiki) | Task 16 |
+| 9-dim advanced recall signals | Task 16 |
 
 ## Quick start (Docker)
 
@@ -63,8 +62,7 @@ pnpm test extensions/memory-milvus
 
 ### Live tests (requires Milvus + embedding API key)
 
-Live end-to-end tests are guarded behind `OPENCLAW_LIVE_TEST=1`.
-Full live validation is deferred to Task 13.
+Live end-to-end tests are guarded behind `OPENCLAW_LIVE_TEST=1`, covering write → search → recordRecall → promotion pipelines.
 
 ```bash
 # Start Milvus first (see Quick start above)
@@ -91,4 +89,5 @@ AI flush turn
 
 - [Task 10 plan](../../refactor/1-plan.md)
 - [Task 10 decisions](../../refactor/2-decisions.md)
-- [Task 13](#) — Alpha exit conditions
+- [Task 13](#) — Dreaming promotion (completed)
+- [Task 16](#) — Dedup / citation / multi-corpus

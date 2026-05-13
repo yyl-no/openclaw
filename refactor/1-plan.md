@@ -413,11 +413,18 @@ type MemoryFlushPlan = {
 
 ### Task 13: 重写 Dreaming Promotion
 
-- Light dreaming：每日记忆摄入（从 Milvus 查询当日条目）
-- REM dreaming：会话语料摄入
-- Deep dreaming：筛选高 recall_count → LLM 合并总结 → 更新 `memory_type="long_term"`
-- Cron 触发机制复用
-- **完工条件**：撤下 Task 10.9 的 `experimental` / `alpha` 标记 + 做一次端到端回归（写入→召回→promotion→long_term 升级全链路通）
+> **状态**：✅ 完成于 2026-05-13
+
+- **Light dreaming**：`backend.search({ memoryType: "short_term", createdAfter: todayStart })` 替代 fs 遍历（详见 decisions §5.2）
+- **REM dreaming**：`backend.search({ sessionKey })` 替代 `listSessionFiles`；entry.text 直接可用不再切分
+- **Deep dreaming**：复用 H 方案 A4 补落地的 SDK `rankPromotionCandidates(opts)` + `applyPromotions(opts)`（阈值由调用方透传，milvus 侧直接实现两方法，SDK 无须再改）
+- **Cron 归属**（Q1α）：**复用 memory-core 的 `dreaming.ts` 外壳**，通过现有 capability 钩子注入 milvus 采集/promotion 实现；阶段调度逻辑不重复（符合 §5.3 “阶段调度 = 共用”）
+- **LLM 合并写回语义**（Q2α）：LLM 总结产出后：（1）新 `write()` 1 条 `memory_type="long_term"`（重 embed、保留 provenance 指向源）；（2）参与合并的 N 条原 short_term 记录 upsert 为 `memory_type="archived"`（不物理删除，物理 delete 推 Task 16）
+- **live 测试补齐**（§12.8/§12.12）：`memory-milvus.live.test.ts` 中 `cfg = {} as any` 替换为真实 `OpenClawConfig` 构造；扩充端到端用例：write → search 命中 → recordRecall 累加 → dreaming 触发 → 新 long_term + 原记录 archived
+- **9 维高级信号**（详见 decisions §13.2）：本任务仅用 `recall_count` + `last_recalled_at` 两维打分；`dailyCount`/`groundedCount`/`totalScore` 等 9 维仍占位推 Task 16
+- **测试**：mock 全链路（采集 → 打分 → LLM 合并（stub） → 双写新 long + 原条 archive）；`OPENCLAW_LIVE_TEST=1` 端到端由真实 Milvus 跑
+- **完工条件 = Alpha 退出全步**：撤下 `package.json` 的 `"stability": "experimental"` + 移除 README 的 “Alpha status” 标注 + live 端到端回归全绿（详见 decisions §12.7/§12.12）
+- 详见 decisions §5 / §13.2 / §12.12
 
 ### Task 14: Markdown → Milvus 迁移工具（延后）
 

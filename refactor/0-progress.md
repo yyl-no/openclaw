@@ -718,3 +718,44 @@
 - degraded 态：warnOnce + return（不调 client）
 - closed 态：throw `"MilvusSearchManager is closed"`
 - context 暂不落库（schema 无对应列）
+
+### Task 13: 重写 Dreaming Promotion ✅ 完成
+
+**完成日期**：2026-05-13
+
+**工程动作**：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | Extend `search()` with `memoryType` + `createdAfter` scalar filters, add `buildScalarFilter` / `combineFilters` / `queryByFilter` | `search.ts` |
+| 2 | Implement `rankPromotionCandidates()`: query short_term → computePromotionScore (recency-weighted recall) → sort → limit | `search.ts` |
+| 3 | Implement `applyPromotions()`: get → insertEntry(long_term) → upsert original(archived); per-candidate non-fatal failure | `search.ts` |
+| 4 | Scalar filter tests (7) + rankPromotionCandidates tests (7) + applyPromotions tests (9) | `search.test.ts` |
+| 5 | Replace `cfg = {} as any` with real `OpenClawConfig` construction; add 4 live E2E tests (write → search → recordRecall → promotion pipeline) | `memory-milvus.live.test.ts` |
+| 6 | Alpha exit: remove `"stability": "experimental"` from package.json; update README capabilities + remove alpha warning | `package.json`, `README.md` |
+
+**测试增量**：
+
+| 测试文件 | 变更 | 测试数 |
+|----------|------|--------|
+| `search.test.ts` | +23 tests（7 scalar filter + 7 rankPromotion + 9 applyPromotions） | 43（原 20） |
+| `memory-milvus.live.test.ts` | 重写 + 4 tests（promotion pipeline） | 4（原 1） |
+| 全量 | 122 passed | +26 |
+
+**实现细节**：
+- `search()` 空 query + scalar filter → `queryByFilter`（纯标量查询，无语义搜索），供 light/REM dreaming 数据采集
+- `rankPromotionCandidates` 使用 `computePromotionScore`：`normalizedRecall = min(recallCount/10, 1.0)` × `recencyDecay = 2^(-ageDays/halfLife)`
+- `applyPromotions` 三步骤：① `get(id)` 读原条目 → ② `insertEntry(long_term)` 写新 long_term（重 embed、provenance.label="recall_promotion"）→ ③ `upsert` 原条目 `memory_type="archived"`
+- `uniqueQueries` 当前使用 `recallCount` 做 proxy，9 维高级信号推迟到 Task 16
+- 所有 promotion 方法遵循 closed/degraded 状态机（closed→throw，degraded→warnOnce+短路）
+
+**Alpha 退出**：
+- ✅ `package.json` 移除 `"stability": "experimental"`
+- ✅ `README.md` 移除 Alpha 警告，更新能力表为全部 ✅
+- ✅ Live E2E 补齐 promotion 全链路
+
+**遗留技术债**（推 Task 16）**：
+- BM25 原生全文搜索（Milvus ≥ 2.4）
+- 9 维高级召回信号（dailyCount / groundedCount / totalScore / maxScore / queryHashes 等）
+- 去重（sha256）、软删除、版本、citation 装饰
+- 多 corpus 全量支持（sessions / wiki）
