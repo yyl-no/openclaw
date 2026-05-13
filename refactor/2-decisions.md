@@ -416,6 +416,18 @@ export const MEMORY_TYPES = {
 - **Fallback 测试**：在单测里 mock client 抛错模拟断连，验证 ndjson 写入与回放逻辑
 - 文件定位：`extensions/memory-milvus/src/*.test.ts` 与 `extensions/memory-milvus/src/*.live.test.ts`
 
+**Live 测试执行档位**（S6 落地决策）：
+- **选型**：方案 A — 最小骨架。1 条 `describe.skipIf(!process.env.OPENCLAW_LIVE_TEST)` 保护的 `write → insert` 端到端用例，README 中提供 Docker 启动 Milvus 说明
+- **真实 Milvus 回归推迟到 Task 13**（Alpha 退出条件）。当前 skeleton 的 `cfg` 参数为 `{} as any` 占位，Task 13 需补齐完整 `OpenClawConfig` 构造
+- **文件**：`extensions/memory-milvus/src/memory-milvus.live.test.ts`（94行）
+
+### 12.12 Alpha 标记与 S6 交付
+
+- **Alpha 标记**：`package.json` 新增 `"stability": "experimental"` 字段（元数据，非机械消费）
+- **README.md**（95行）：标注 Alpha 状态 + 当前支持/不支持能力清单 + Docker 快速启动 + 测试说明
+- **S6 交付**：Alpha 标记 / README / live 测试骨架 / Mock 单测收口（58 tests 全绿）
+- **Alpha 退出条件（Task 13）**：`recordRecall` 正式实现 + Dreaming promotion + `stability` 字段撤下
+
 ### 12.9 pi-tools 白名单归属（务实决策）
 
 - **现状**：`MEMORY_FLUSH_ALLOWED_TOOL_NAMES` 硬编码在 `src/agents/pi-tools.ts` L98，Task 10 会追加 `memory_write`

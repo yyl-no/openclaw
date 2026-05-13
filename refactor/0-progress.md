@@ -474,3 +474,45 @@
 - `pnpm test extensions/memory-milvus` → 5 files, **58 tests** passed（+9 tools.test）
 - `pnpm tsgo:extensions` → memory-milvus **零错误**（仅 memory-core 11 预存）
 - `pnpm build` → 全绿
+
+---
+
+### S6 · Alpha 标记 + 测试整合（2026-05-13）
+
+**改动文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `extensions/memory-milvus/package.json`（+1行） | 新增 `"stability": "experimental"` 字段 |
+| `extensions/memory-milvus/README.md`（新建，95行） | Alpha 标注 / 能力清单 / Docker Milvus 快速启动 / 测试说明 / 架构图 |
+| `extensions/memory-milvus/src/memory-milvus.live.test.ts`（新建，94行） | 1 条 `describe.skipIf(OPENCLAW_LIVE_TEST !== "1")` 保护的 `write → insert` E2E 用例 |
+| `refactor/2-decisions.md`（+12行） | §12.8 追加 Live 测试执行档位决策（方案A），§12.12 Alpha 标记与 S6 交付 |
+
+**S6-1 Alpha 标记**：
+- `package.json` `"stability": "experimental"` — 元数据字段，当前未被插件 loader 机械消费
+- `README.md` 明确标注"Alpha status — production use not recommended until Task 13"
+- 能力清单：✅ memory_write / Collection bootstrap / degraded / 校验 / prompt vs ❌ memory_search / memory_get / recordRecall / promotion / BM25 / dedup
+
+**S6-2 Live 测试骨架**：
+- `memory-milvus.live.test.ts`：1 条端到端用例，验证 write 返回合法 id + provenance
+- 通过 `OPENCLAW_LIVE_TEST` + `OPENCLAW_MILVUS_HOST/PORT` + `OPENCLAW_MILVUS_EMBED_PROVIDER/MODEL` 环境变量控制
+- 真实 Milvus 回归 **推迟到 Task 13**（Alpha 退出条件），当前 skeleton 的 `OpenClawConfig` 为 `{} as any` 占位
+- README 提供 `docker run -d -p 19530:19530 milvusdb/milvus:v2.4.0 standalone` 启动说明
+
+**S6-3 Mock 单测收口**：5 files, **58 tests** 全绿（默认 CI `pnpm test extensions/memory-milvus` 一把跑绿）
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 5 files, **58 tests** passed（live test 被 skipIf 正确跳过）
+- `pnpm tsgo:extensions` → memory-milvus **零错误**（仅 memory-core 11 预存）
+- `pnpm build` → 全绿
+
+**Task 10 进度总览**：
+| 步骤 | 状态 | 测试数 |
+|------|------|--------|
+| S1 类型契约 | ✅ | 28 |
+| S2 初始化基础设施 | ✅ | 8 |
+| S3 Fallback | ✅ | 7 |
+| S4 write 核心 | ✅ | 6 |
+| S5 AI 调用链 | ✅ | 9 |
+| S6 Alpha+测试 | ✅ | — |
+| S7 收尾 | ⬜ | — |
