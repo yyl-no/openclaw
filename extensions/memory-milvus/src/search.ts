@@ -9,10 +9,11 @@
  * - ⚠️ 后期升级：Milvus ≥ 2.4 BM25 Function 后切换为原生 BM25（见 decisions §8.1）
  */
 
-import { MilvusClient, type SearchSimpleReq, type QueryReq } from "@zilliz/milvus2-sdk-node";
+import { MilvusClient, type NumberArrayId, type QueryReq, type RowData, type SearchSimpleReq } from "@zilliz/milvus2-sdk-node";
 import type { MemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import type {
   MemoryEmbeddingProbeResult,
+  MemoryEntry,
   MemoryProviderStatus,
   MemoryReadResult,
   MemoryReference,
@@ -26,9 +27,17 @@ import {
   FIELD_SNIPPET,
   FIELD_TEXT,
   OUTPUT_FIELDS,
+  entryToInsertData,
   rowToMemoryEntry,
   rowToMemoryReference,
 } from "./schema.js";
+import {
+  assertValidMemoryType,
+  assertValidSourceLabel,
+  MEMORY_SOURCE_LABELS,
+  MEMORY_TYPES,
+} from "./types.js";
+import { replayFallback, writeFallback } from "./fallback.js";
 
 // ── 配置类型 ──────────────────────────────────────────────────────
 
@@ -236,6 +245,7 @@ export class MilvusSearchManager {
     private readonly provider: MemoryEmbeddingProvider,
     private readonly agentId: string,
     private readonly cfg: MilvusSearchConfig,
+    private readonly workspaceDir: string,
     opts?: { degraded?: boolean },
   ) {
     this.degraded = opts?.degraded ?? false;
@@ -468,6 +478,151 @@ export class MilvusSearchManager {
       lines,
       nextFrom: lines !== undefined ? from + lines : undefined,
     };
+  }
+
+  // ── 写入（MemoryDataBackend.write） ───────────────────────────
+
+  /**
+   * 写入一条记忆到 Milvus。
+   *
+   * 流程：
+   * 1. 校验 metadata（sourceLabel / memoryType）
+   * 2. 若 degraded 或健康探测失败 → 走 fallback ndjson 兜底
+   * 3. 健康 → 先回放 fallback 积压条目，再 embed + insert 新条目
+   * 4. 任一环节失败 → 走 fallback，返回占位 MemoryReference
+   */
+  async write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+
+    // 组装元数据
+    const label = (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT;
+    assertValidSourceLabel(label);
+    const memoryType = entry.memoryType ?? MEMORY_TYPES.SHORT_TERM;
+    assertValidMemoryType(memoryType);
+
+    const fullEntry: Omit<MemoryEntry, "id"> = {
+      text: entry.text,
+      snippet: entry.snippet ?? entry.text.slice(0, 200),
+      agentId: entry.agentId ?? this.agentId,
+      sessionKey: entry.sessionKey, // TODO(Task 16): Host 注入默认 sessionKey
+      memoryType,
+      recallCount: entry.recallCount ?? 0,
+      createdAt: entry.createdAt ?? new Date().toISOString(),
+      updatedAt: entry.updatedAt ?? new Date().toISOString(),
+      provenance: { kind: "milvus", label },
+    };
+
+    // degraded 或健康探测失败 → 直接 fallback
+    if (this.degraded || !(await this.healthCheck())) {
+      return this.fallbackWrite(fullEntry);
+    }
+
+    // 健康路径：先回放 fallback 积压
+    try {
+      await replayFallback(this.workspaceDir, async (fb) => {
+        await this.insertEntry(fb);
+      });
+    } catch (err) {
+      console.warn(
+        "[memory-milvus] Fallback replay error (continuing):",
+        (err as Error).message ?? err,
+      );
+    }
+
+    // 写入新条目
+    try {
+      const ref = await this.insertEntry(fullEntry);
+      return ref;
+    } catch (err) {
+      console.warn(
+        "[memory-milvus] Insert failed, writing to fallback:",
+        (err as Error).message ?? err,
+      );
+      return this.fallbackWrite(fullEntry);
+    }
+  }
+
+  /**
+   * embed + insert 一条 MemoryEntry 到 Milvus。
+   * 返回 MemoryReference（id 为 Milvus 自增主键）。
+   */
+  private async insertEntry(
+    entry: Omit<MemoryEntry, "id">,
+  ): Promise<MemoryReference> {
+    const vector = await this.provider.embedQuery(entry.text);
+    if (!vector || vector.every((v) => v === 0)) {
+      throw new Error("Embedding returned empty vector");
+    }
+
+    const data = entryToInsertData(entry);
+    data[FIELD_EMBEDDING] = vector;
+
+    const result = await this.client.insert({
+      collection_name: this.collectionName,
+      data: [data as unknown as RowData],
+    });
+
+    // 提取 Milvus 自增主键
+    const pk = (result.IDs as NumberArrayId)?.int_id?.data?.[0];
+    const idStr = pk != null ? String(pk) : `milvus:${Date.now()}`;
+
+    return {
+      id: idStr,
+      snippet: entry.snippet ?? entry.text.slice(0, 200),
+      score: 0,
+      provenance: {
+        kind: "milvus",
+        label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
+      },
+    };
+  }
+
+  // ── 健康探测 ──────────────────────────────────────────────────
+
+  /** 轻量 Milvus 健康探测（describe_collection） */
+  private async healthCheck(): Promise<boolean> {
+    try {
+      await this.client.describeCollection({
+        collection_name: this.collectionName,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── 写入兜底 ──────────────────────────────────────────────────
+
+  /** 写入 NDJSON fallback，返回占位 MemoryReference */
+  private async fallbackWrite(
+    entry: Omit<MemoryEntry, "id">,
+  ): Promise<MemoryReference> {
+    await writeFallback(this.workspaceDir, entry).catch((err) => {
+      console.warn("[memory-milvus] writeFallback also failed:", (err as Error).message);
+    });
+
+    return {
+      id: `fallback:${Date.now()}`,
+      snippet: entry.snippet ?? entry.text.slice(0, 200),
+      score: 0,
+      provenance: {
+        kind: "milvus",
+        label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
+      },
+    };
+  }
+
+  // ── recordRecall 占位 ─────────────────────────────────────────
+
+  /**
+   * TODO(Task 12): replace with real milvus recall_count update.
+   * 当前仅 warn，不做任何持久化。
+   */
+  async recordRecall(
+    _refs: MemoryReference[],
+    _context?: { query: string; timezone?: string },
+  ): Promise<void> {
+    console.warn("[memory-milvus] recordRecall not yet implemented (Task 12)");
   }
 
   // ── 状态 ──────────────────────────────────────────────────────

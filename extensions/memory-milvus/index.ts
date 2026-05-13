@@ -190,12 +190,14 @@ const milvusRuntime: MemoryPluginRuntime = {
       );
 
       // 创建搜索管理器
+      const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
       const manager = new MilvusSearchManager(
         client,
         searchCfg.collectionName,
         provider,
         agentId,
         searchCfg,
+        workspaceDir,
         { degraded },
       );
 

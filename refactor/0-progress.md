@@ -410,3 +410,33 @@
 - `withFileLock` — 复用 `memory-append-safe.ts` 的 in-process lock 模式
 - `deserializeEntry` — 宽松解析，无效行直接丢弃，缺失字段补默认值
 - `replaySingleFile` — 按文件批处理：全部回放→重写文件仅保留失败条目→文件变空则删除
+
+---
+
+### Task 10-S4: MilvusSearchManager.write 核心实现（含 recordRecall 占位）✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task10-S4 + `2-decisions.md` §12.2/12.5/12.7/10.3/10.8
+
+**改动文件**：
+
+| 文件 | 改动 |
+|------|------|
+| `extensions/memory-milvus/src/search.ts`（修改，+147行） | `MilvusSearchManager` 新增：`write(entry)` — 完整写入链路（元数据组装→健康探测→回放积压→embed+insert→fallback兜底）；`insertEntry()` — 私有 embed+insert 方法；`healthCheck()` — `describe_collection` 轻量探测；`fallbackWrite()` — 失败兜底；`recordRecall()` — 占位 warn。构造函数新加 `workspaceDir` 参数 |
+| `extensions/memory-milvus/index.ts`（修改，+2行） | `getMemorySearchManager` 中通过 `resolveAgentWorkspaceDir` 获取 `workspaceDir` 并传递给 `MilvusSearchManager` 构造函数 |
+| `extensions/memory-milvus/src/search.test.ts`（新建，286行） | 6 个单测用例：覆盖成功写入 / embed失败→fallback / insert失败→fallback / degraded直fallback / 健康探测失败→fallback / recordRecall仅warn不抛错 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 4 files, **49 tests** passed（types 28 + bootstrap 8 + fallback 7 + search 6）
+- `pnpm build` → 全绿
+- `pnpm tsgo:extensions` → memory-milvus **零错误**
+
+**write() 五路分治流程**：
+1. **元数据组装**：`agentId`(Host) / `sessionKey`(TODO) / `memoryType`(`"short_term"`) / `createdAt`(ISO now) / `provenance.label`(caller) → `assertValidSourceLabel`+`assertValidMemoryType` 校验
+2. **degraded / 健康探测失败** → 直接 `fallbackWrite()`，返回 `fallback:<ts>` 占位 id
+3. **健康** → `replayFallback(workspaceDir, insertEntry)` 批量回灌积压
+4. **新写入** → `embedQuery(text)` + `entryToInsertData()` + `client.insert()`，返回 Milvus 自增 PK
+5. **embed/insert 异常** → `fallbackWrite()` 兜底
+
+**fixup**（2026-05-13）：`search.test.ts` 中三处 provider mock 的 `dimensions: 1024` 多余字段清理——`MemoryEmbeddingProvider` 接口不含 `dimensions` 属性，改补 `id`+`model` 必选字段。
