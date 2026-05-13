@@ -302,17 +302,103 @@ type MemoryFlushPlan = {
 - 文件后端改走 `memory_write`（等 Task 16）
 - pi-tools 白名单下沉（见 §12.9，留技术债）
 
-### Task 11: 重写 memory_search / memory_get / memory_recall
+### Task 11: 重写 memory_search / memory_get（含 recordRecall hook）
 
-- `memory_search`：Milvus ANN + BM25 混合检索 → `MemoryReference`
-- `memory_get`：按 id 查询 PK → `MemoryEntry`
-- `memory_recall`：跟踪召回，更新 `recall_count` / `last_recalled_at`
+> **注**：`memory_recall` 是召回追踪机制的描述名词，**不是 AI 工具**；AI 可见工具仅 `memory_search` + `memory_get` + `memory_write`。详见 decisions §13.1。
+
+- `memory_search`：Milvus ANN + BM25 混合检索 → `MemoryReference[]`，命中后内部触发 `recordRecall` hook（manager 实现仍为 warn 占位，落库由 Task 12 完成）
+- `memory_get`：按 id 查询 PK → `MemoryEntry`（新增 `MilvusSearchManager.get(id)` 实现，**与现有 `readFile` 并存不动**；详见 decisions §14）
+  - 一次性取全 12 个字段（含 `last_recalled_at`），返回完整 `MemoryEntry`，不支持切片
+  - id 不存在 / closed / degraded 一律 `throw`，不触发 `recordRecall`
+- **Schema 增量**：新增 `last_recalled_at` VarChar(32) 字段（详见 decisions §13.2）
+- **工具注册互斥**（详见 decisions §13.4 方案 Y）：信赖 `src/plugins/slots.ts` 的 `applyExclusiveSlotSelection` 预处理阶段 entries disable 机制；两插件 `register()` 内**无条件**注册同名工具，memory-core/index.ts 不动
+- **会话可见性**：复用 `filterMemorySearchHitsBySessionVisibility`（应用层）；backend 侧 expr 原生过滤推到 Task 16
+- **多 corpus 范围**（详见 decisions §17）：schema 与 memory-core 一对一；`memory`/undefined 正常查询；`sessions`/`wiki`/`all` 返回空 + warnOnce，真正接入推 Task 16
+- **degraded 行为**（详见 decisions §16）：`search()` 加 `if (this.degraded) return []`（与 closed 一致的静默降级语义）
+- **citation 装饰 pipeline**（详见 decisions §18）：Task 11 不装饰也不复刻 memory-core 的 `decorateCitations`，`MemoryReference` 原样透传；首次命中 warnOnce；完整能力推 Task 16
+
+#### 执行步骤（四步单线串行）
+
+> 前置验证：R1/R4/R6 已解除——`OpenClawPluginApi.config` 可读、memory-core/index.ts L190/L194 为注册点、`slots.ts` `applyExclusiveSlotSelection` 自动 disable 非 selected 插件 entries。
+
+**Step 1 —— Schema 扩展 + Manager 底层方法**
+
+涉改：
+- `extensions/memory-milvus/src/schema.ts` — 新增 `FIELD_LAST_RECALLED_AT = "last_recalled_at"`（VarChar(32)）
+- `extensions/memory-milvus/src/collection-bootstrap.ts` — schema 字段列表追加 `last_recalled_at`
+- `extensions/memory-milvus/src/search.ts` — `search()` 在 `if (this.closed) return [];` 之后新增 `if (this.degraded) { warnOnce(...); return []; }`
+- `extensions/memory-milvus/src/search.ts` — 新增 `MilvusSearchManager.get(id): Promise<MemoryEntry>`（一次取全 12 字段，not-found / closed / degraded 一律 throw，不触发 recordRecall）
+- `extensions/memory-milvus/src/warn-once.ts`（新建） — key-based 去重 warn helper
+
+测试：
+- `search.test.ts` — degraded case；`get(id)` 四态 case（found / not-found throw / closed throw / degraded throw）
+- `collection-bootstrap.test.ts` — 字段集含 `last_recalled_at`
+
+验收：`pnpm test extensions/memory-milvus/src/search.test.ts extensions/memory-milvus/src/collection-bootstrap.test.ts` 全绿 + `pnpm tsgo` 无新错。
+
+**Step 2 —— 工具层（memory_search / memory_get）**
+
+涉改：
+- `extensions/memory-milvus/src/tools.search.ts`（新建） — `createMemorySearchTool(deps)`：
+  - 复刻 `MemorySearchSchema` 结构（对象字面量，字段 `query` / `maxResults` / `minScore` / `corpus`，与 `tools.shared.ts` L30-42 一对一）
+  - corpus 路由：`memory` / undefined → `manager.search()`；`sessions` / `wiki` / `all` → `warnOnce` + 返回空
+  - 命中后 recordRecall hook：`void manager.recordRecall?.(refs, ctx)`（manager 实现仍为 warn 占位，Task 12 完工）
+  - 首次命中 warnOnce（`"citations rendering not yet supported in milvus backend; deferred to Task 16"`）
+  - 复用 `filterMemorySearchHitsBySessionVisibility`
+  - 返回 `MemoryReference[]` 原样，**不**装饰 snippet
+- `extensions/memory-milvus/src/tools.get.ts`（新建） — `createMemoryGetTool(deps)`：
+  - 复刻 `MemoryGetSchema` 结构（`path` / `from` / `lines` / `corpus` / `id`）
+  - 实际仅用 `id`，其他参数占位忽略
+  - 调 `manager.get(id)` 返回 `MemoryEntry`，**不**触发 recordRecall
+
+测试：
+- `tools.search.test.ts` — query 必填；`corpus=memory` 走 `manager.search`；`sessions`/`wiki`/`all` 返空 + warnOnce 被调；命中 recordRecall 被调；返回 MemoryReference 不含 `\n\nSource:` 后缀；**schema 字段集反向守护断言**（硬编码 `["query","maxResults","minScore","corpus"]`）
+- `tools.get.test.ts` — id 路径正常 / not-found throw / closed throw / degraded throw / 不触发 recordRecall
+
+验收：`pnpm test extensions/memory-milvus/src/tools.search.test.ts extensions/memory-milvus/src/tools.get.test.ts` 全绿。
+
+**Step 3 —— Plugin 注册集成**
+
+涉改：
+- `extensions/memory-milvus/index.ts` — `register(api)` 内在现有 `memory_write` 注册之后**无条件**追加：
+  ```ts
+  api.registerTool(() => createMemorySearchTool({ getManager: () => activeManager }), { names: ["memory_search"] });
+  api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), { names: ["memory_get"] });
+  ```
+  删除 L246 `// memory_search / memory_get 工具由 Task 11 注册` 占位注释
+- `extensions/memory-core/index.ts` — **不动**（slots.ts 已保障互斥）
+
+测试：
+- `extensions/memory-milvus/src/register.test.ts`（新建或并入 `index.test.ts`） — mock `OpenClawPluginApi`，调 `pluginEntry.register(mockApi)`，断言 `registerTool` 被调用 3 次，names 依次为 `["memory_write"]` / `["memory_search"]` / `["memory_get"]`（对应 Q3.7 mock api 单测方案）
+
+验收：`pnpm test extensions/memory-milvus` 全绿；手工回归配置 `slots.memory = "memory-milvus"`，确认工具清单含三件。
+
+**Step 4 —— 全量回归 + 文档归档**
+
+涉改：
+- `refactor/0-progress.md` — 追加 Task 11 完工总结：工程动作清单 5 条、决策引用 §13-§18、测试矩阵、风险回顾（R1/R4/R6 解除）
+- `refactor/1-plan.md` — Task 11 小节标记 `**状态**：✅ 完成于 YYYY-MM-DD`
+- `CHANGELOG.md`（按需） — `### Changes` 加一条：“memory-milvus: register memory_search / memory_get tools backed by Milvus (Alpha)”
+
+测试：
+- `pnpm test extensions/memory-milvus` 全绿
+- `pnpm tsgo` 全绿
+- `pnpm check:changed` 全绿
+- （可选）`OPENCLAW_LIVE_TEST=1 pnpm test extensions/memory-milvus/src/memory-milvus.live.test.ts` 真实 Milvus 端到端
+
+验收：所有自动化检查通过、文档同步、准备进入 Task 12（recordRecall 真实落库）。
+
+**精简原则 & 依赖一致性**：
+- 每步自洽可编译可测试，无反向依赖（Step N+1 不回改 Step N 文件）
+- Step 1 底层独立 → Step 2 仅依赖 Step 1 manager 方法 → Step 3 仅做“粘合”代码量最小 → Step 4 纯验收归档
+- 每步工程动作均可追溯到 decisions §13-§18 决策，无交叉冲突
 
 ### Task 12: 重写 Short-term Recall Tracking
 
 - 替代 `short-term-recall.json`
-- 每次 `get()` 记录召回
-- 存储在 Milvus 字段 `recall_count` / `last_recalled_at`
+- `MilvusSearchManager.recordRecall` 真实落库：`query + upsert` 两步，同步更新 `recall_count += 1` 与 `last_recalled_at = now()`
+- 触发时机：每次 `memory_search` **命中后**（不是 `memory_get`，与 memory-core 行为一致）
+- 详见 decisions §13.3
 
 ### Task 13: 重写 Dreaming Promotion
 
@@ -344,6 +430,16 @@ type MemoryFlushPlan = {
 - 版本：metadata 记录修改历史
 - citation：MemoryReference 含 citation
 - agent 隔离：`agent_id` 字段 + 查询过滤
+- **SDK backend 枚举正式扩展**：`"builtin" \| "qmd"` → `"builtin" \| "qmd" \| "milvus"`（撤下 memory-milvus 中 `resolveMemoryBackendConfig` 伪装 qmd 的 stub）
+- **`memory_write` 对称规划**：文件后端也走 `memory_write`，复用 Task 11 的 slot 条件 register 机制
+- **backend 侧会话可见性 expr 原生过滤**（Milvus collection expr `session_key == "..."`），与应用层 `filterMemorySearchHitsBySessionVisibility` 双层叠加
+- **BM25 原生升级**（详见 decisions §8.1 + §15）：当 Milvus ≥ 2.4 服务端已创建 BM25 Function 后，`searchKeyword()` 切 `hybridSearch + WeightedRanker`，删除客户端 TF-IDF；schema 加 `FIELD_SPARSE_BM25` + 索引；含融合权重 w1/w2 参数化与 `extractKeywords` 算法治理
+- **多 corpus 全量支持**（详见 decisions §17）：`corpus=sessions` → milvus 存 session 转录方案 + memory_type 过滤；`corpus=wiki` / `all` → 接入 `searchMemoryCorpusSupplements` / `getMemoryCorpusSupplementResult` 机制，与 milvus 命中多路融合排序
+- **citation 装饰完整接入**（详见 decisions §18）：Task 16 评估 SDK 共享抽取三选：X（提到 `packages/memory-host-sdk`）/ Y（memory-core runtime-api 导出）/ Z（milvus 复刻，不推荐）；接入 `cfg.memory.citations: "on"|"off"|"auto"`，覆盖 direct/group auto 模式
+- **高级召回维度（对标 OpenClaw 官方 11 维打分）**：
+  - 字段：`dailyCount` / `groundedCount` / `totalScore` / `maxScore` / `firstRecalledAt` / `queryHashes` / `recallDays` / `conceptTags` / `claimHash`
+  - 状态：**待定**，评估是否采纳官方多维加权打分模型升级 Task 13 Deep Dreaming
+  - 触发：`recordRecall` 扩展 + Collection schema 扩字段
 
 ---
 

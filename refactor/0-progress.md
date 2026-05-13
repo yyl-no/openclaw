@@ -515,4 +515,98 @@
 | S4 write 核心 | ✅ | 6 |
 | S5 AI 调用链 | ✅ | 9 |
 | S6 Alpha+测试 | ✅ | — |
-| S7 收尾 | ⬜ | — |
+| S7 收尾 | ✅ | — |
+
+---
+
+## ✅ Task 10 完成（2026-05-13）
+
+### 验收证据
+
+| 检查项 | 结果 |
+|--------|------|
+| `pnpm test extensions/memory-milvus` | 5 files, **58 tests** passed |
+| `pnpm tsgo:extensions` | memory-milvus **0 错误** |
+| `pnpm build` | 全绿 |
+| `pnpm check:changed` | 全绿 |
+
+### S1–S7 改动文件总清单
+
+| 步骤 | 文件 | 行数 |
+|------|------|------|
+| S1 | `src/types.ts`（新建） | 96 |
+| S1 | `src/types.test.ts`（新建） | 228 |
+| S2 | `src/collection-bootstrap.ts`（新建） | 254 |
+| S2 | `src/collection-bootstrap.test.ts`（新建） | 212 |
+| S2 | `src/search.ts`（新建，含 degraded） | 692 |
+| S2 | `index.ts`（重写，接入 degraded） | 241 |
+| S3 | `src/fallback.ts`（新建） | 149 |
+| S3 | `src/fallback.test.ts`（新建） | 306 |
+| S4 | `src/search.ts`（+write 5路分治） | （含 S2） |
+| S4 | `src/search.test.ts`（新建） | 287 |
+| S5 | `src/tools.ts`（新建） | 102 |
+| S5 | `src/tools.test.ts`（新建） | 173 |
+| S5 | `index.ts`（+工具注册+prompt） | +8 |
+| S5 | `openclaw.plugin.json`（+memory_write） | +1/-1 |
+| S5 | `src/agents/pi-tools.ts`（白名单） | +1/-1 |
+| S6 | `package.json`（+stability） | +1 |
+| S6 | `README.md`（新建） | 95 |
+| S6 | `src/memory-milvus.live.test.ts`（新建） | 94 |
+| S6 | `refactor/2-decisions.md`（+§12.8/12.12） | +12 |
+
+**核心文件**：`extensions/memory-milvus/` 下 14 个文件（源码 9 + 测试 5），约 3100 行。
+
+### 关键不变式验证
+
+| 不变式 | 状态 |
+|--------|------|
+| 文件后端零回归（S5 只追加白名单，不动 wrap） | ✅ `pi-tools.ts` L855 分支不受 `memory_write` 影响 |
+| Milvus 不可用时写入不丢（degraded → fallback） | ✅ 4 条 write 路径覆盖 |
+| Label/Type 越界即抛错（S1校验+S4/S5入口复用） | ✅ tools.test 8 条覆盖 |
+| 插件 Alpha 标记（S6 stability:experimental） | ✅ |
+
+### 遗留技术债
+
+| 项目 | 说明 | 目标 |
+|------|------|------|
+| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step1 完成（schema + get(id)），待 Step2-4 | Task 11 |
+| `recordRecall` 正式实现 | 当前仅 console.warn 占位 | Task 12 |
+| Dreaming promotion（短→长） | Task 13，Alpha 退出条件 | memory-milvus |
+| live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
+| pi-tools 白名单架构下沉 | 当前硬编码，未来多后端时评估 | Task 16+ |
+| `session_key` 默认值 | write() 中 TODO：Host 注入默认 sessionKey | Task 16 |
+| BM25 全文本搜索 | Task 14 | memory-milvus |
+| sha256 去重 / update / delete / 版本 | Task 16 | memory-milvus |
+
+---
+
+## 第三部分：memory_search / memory_get 工具
+
+### Task 11 Step 1: Schema 扩展 + Manager 底层方法 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task11 Step1 + `2-decisions.md` §13-16
+
+**改动文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `extensions/memory-milvus/src/schema.ts` | + `FIELD_LAST_RECALLED_AT` 常量；入 `ALL_SCHEMA_FIELDS` / `entryToInsertData` |
+| `extensions/memory-milvus/src/warn-once.ts`（新建） | key-based 去重 `warnOnce(key, message)` helper |
+| `extensions/memory-milvus/src/collection-bootstrap.ts` | `buildCollectionFields` 追加 `last_recalled_at` (VarChar(32), β) |
+| `extensions/memory-milvus/src/collection-bootstrap.test.ts` | fields 计数 13→14；`last_recalled_at` 字段名断言 |
+| `extensions/memory-milvus/src/search.ts` | `search()` 追加 `degraded` 静默降级 + `warnOnce`；新增 `get(id): Promise<MemoryEntry>`（13 字段取全，close/degraded/not-found → throw） |
+| `extensions/memory-milvus/src/search.test.ts` | +5 tests：1 degraded search + 4 get 四态（found / not-found throw / closed throw / degraded throw） |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 5 files, **63 tests** passed（58→63，+5）
+- `pnpm tsgo:extensions` → memory-milvus **0 错误**
+
+**Task 11 进度**：
+| 步骤 | 状态 |
+|------|------|
+| Step 1 Schema+Manager | ✅ |
+| Step 2 工具层 | ⬜ |
+| Step 3 Plugin 注册 | ⬜ |
+| Step 4 全量回归 | ⬜ |

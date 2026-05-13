@@ -50,7 +50,9 @@ describe("ensureCollectionReady: 全新创建", () => {
     const createCall = (client.createCollection as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(createCall.collection_name).toBe("openclaw_memory");
     expect(createCall.enable_dynamic_field).toBe(false);
-    expect(createCall.fields).toHaveLength(13); // 12 schema + 1 metadata JSON
+    expect(createCall.fields).toHaveLength(14); // 13 schema + 1 metadata JSON
+    const fieldNames = createCall.fields.map((f: { name: string }) => f.name);
+    expect(fieldNames).toContain("last_recalled_at");
 
     expect(client.createIndex).toHaveBeenCalledTimes(1);
     const indexCall = (client.createIndex as ReturnType<typeof vi.fn>).mock.calls[0][0];

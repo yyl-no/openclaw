@@ -14,6 +14,7 @@ import {
   FIELD_CREATED_AT,
   FIELD_EMBEDDING,
   FIELD_ID,
+  FIELD_LAST_RECALLED_AT,
   FIELD_MEMORY_TYPE,
   FIELD_PROVENANCE_KIND,
   FIELD_PROVENANCE_LABEL,
@@ -135,6 +136,12 @@ function buildCollectionFields(embeddingDim: number): FieldType[] {
       data_type: "VarChar",
       type_params: { max_length: String(TIMESTAMP_MAX_LENGTH) },
       description: "ISO 8601 update timestamp",
+    },
+    {
+      name: FIELD_LAST_RECALLED_AT,
+      data_type: "VarChar",
+      type_params: { max_length: String(TIMESTAMP_MAX_LENGTH) },
+      description: "ISO 8601 last recall timestamp (β)",
     },
     {
       name: FIELD_METADATA,

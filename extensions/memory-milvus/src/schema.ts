@@ -39,6 +39,7 @@ export const FIELD_PROVENANCE_KIND = "provenance_kind";
 export const FIELD_PROVENANCE_LABEL = "provenance_label";
 export const FIELD_CREATED_AT = "created_at";
 export const FIELD_UPDATED_AT = "updated_at";
+export const FIELD_LAST_RECALLED_AT = "last_recalled_at";
 
 /** 所有字段名集合 */
 export const ALL_SCHEMA_FIELDS = [
@@ -54,6 +55,7 @@ export const ALL_SCHEMA_FIELDS = [
   FIELD_PROVENANCE_LABEL,
   FIELD_CREATED_AT,
   FIELD_UPDATED_AT,
+  FIELD_LAST_RECALLED_AT,
 ] as const;
 
 // ── Schema 配置常量 ────────────────────────────────────────────────
@@ -166,5 +168,6 @@ export function entryToInsertData(
       entry.provenance?.label ?? "",
     [FIELD_CREATED_AT]: entry.createdAt ?? now,
     [FIELD_UPDATED_AT]: entry.updatedAt ?? now,
+    [FIELD_LAST_RECALLED_AT]: "",
   };
 }

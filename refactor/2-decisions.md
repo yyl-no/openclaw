@@ -438,3 +438,218 @@ export const MEMORY_TYPES = {
   - 当前只追加一个 `memory_write`，未来如果出现更多 memory 相关插件工具，再统一重构
 - **遗留事项**：记录为技术债，留待 Task 16 之后的架构统一阶段评估是否下沉
 
+---
+
+## 13. Task 11 实施细节决策
+
+### 13.1 memory_recall 语义澄清（Q1）
+
+**问题**：plan 原文把 `memory_recall` 列为 Task 11 三件套之一，但 SDK `MemoryDataBackend` 把 `recordRecall` 定义为 backend 方法，与"AI 工具"语义冲突。
+
+**结论**：`memory_recall` 是 OpenClaw 召回追踪机制的**描述性名词**，**不是 AI 可调工具**。
+
+- AI 可见工具集仅三个：`memory_search` + `memory_get` + `memory_write`
+- 召回追踪走 `MemoryDataBackend.recordRecall` 方法，由 `memory_search` 工具内部 hook 自动触发（与 `extensions/memory-core/src/tools.ts::queueShortTermRecallTracking` 行为一致）
+- **触发时机**：search 命中后**自动**执行（与 plan Task 12 原文 "每次 get() 记录召回" 不一致，以本决策为准）
+
+### 13.2 last_recalled_at 字段新增（β 方案）
+
+**对标依据**：OpenClaw 官方 memory 升级机制有 11 维统计（`recallCount` / `dailyCount` / `groundedCount` / `totalScore` / `maxScore` / `firstRecalledAt` / `lastRecalledAt` / `queryHashes` / `recallDays` / `conceptTags` / `claimHash`），当前 Milvus 只有 `recall_count` 一维。
+
+**Task 11 范围内顺手加 1 维**：
+- 字段名：`last_recalled_at`
+- 类型：`VarChar(32)`（与 `created_at` / `updated_at` 同构 ISO 字符串）
+- 写入：每次 search 命中由 `recordRecall` 同步更新为 `now()`
+- 用途：Task 13 Deep Dreaming 区分"最近热"vs"历史总热"
+- Schema 增量：`extensions/memory-milvus/src/schema.ts` 新增 `FIELD_LAST_RECALLED_AT = "last_recalled_at"` 常量
+
+**其余 9 维**（`dailyCount` / `groundedCount` / `totalScore` / `maxScore` / `firstRecalledAt` / `queryHashes` / `recallDays` / `conceptTags` / `claimHash`）→ **Task 16 占位待定**，评估是否采纳官方多维加权打分模型升级 Task 13 Deep Dreaming。
+
+### 13.3 Task 11 vs Task 12 边界（Q2）
+
+**问题**：plan 原文 Task 11 写"更新 recall_count"，Task 12 又写"recordRecall 正式实现"，重叠不清。
+
+**结论**：
+
+| Task | 范围 |
+|------|------|
+| **Task 11** | `memory_search` 工具内**接入 recordRecall hook 调用点**（与 memory-core 同构）；`MilvusSearchManager.recordRecall` **维持 warn 占位**（不写库） |
+| **Task 12** | `recordRecall` **真实落库**（`query + upsert` 两步），同步更新 `recall_count += 1` 与 `last_recalled_at = now()`；同时替代 `short-term-recall.json` 文件存储 |
+
+### 13.4 工具注册互斥与槽位机制（Q3）
+
+**背景**：方案 H（§6 / §11）已锁“通过 `plugins.slots.memory` 互斥切换”。capability 层（promptBuilder / flushPlanResolver / runtime）由 `registerMemoryCapability` 单槽位覆盖天然互斥；**工具注册层**的互斥由 `src/plugins/slots.ts` 的 `applyExclusiveSlotSelection` 提供：选定 `slots.memory = "memory-milvus"` 时自动将所有其他 `kind:"memory"` 插件的 `entries[id].enabled = false`，loader **不会调用**被禁用插件的 `register()`。默认 slot 为 `"memory-core"`（`DEFAULT_SLOT_BY_KEY.memory`），设 `slots.memory = "none"` 时两边均被禁用。
+
+**核心决策**：**单层信赖 slots.ts**——两插件 `register()` 内部**无条件**注册同名工具，不再重复判断 slot。register() 被调用这事本身就证明本插件是当前 slot 选中者，与现有 memory-milvus `memory_write` 无条件注册风格一致。
+
+**Q3 子项决策表**：
+
+| 子项 | 决策 | 备注 |
+|------|------|------|
+| Q3.1 激活模型 | 沿用方案 H（互斥），不重新决策 | Task 7 已锁 |
+| Q3.2 SDK backend 枚举扩展 | **Alpha 期继续伪装 `qmd`**（保留 `resolveMemoryBackendConfig` stub），Task 16 正式扩 `"builtin" \| "qmd" \| "milvus"` | 最小改动 |
+| Q3.3 register 条件判断 | **不做**。两插件 `register()` 内**无条件** `api.registerTool`，注册互斥全部交给 `src/plugins/slots.ts` 预处理阶段的 entries disable 机制 | 信赖核心机制，避免双保险冷捷扇 |
+| Q3.4 host loader 互斥跳过（P1） | **推到 Task 15**，Task 11 不动 host 代码 | 越界规避 |
+| Q3.5 Manifest contract 声明 | **两份保留**（声明能力不等于实际注册），不改 manifest JSON | 解耦声明与运行时 |
+| Q3.6 memory_write 对称规划 | **不在 Task 11 处理**，Task 16 待定（届时文件后端也走 `memory_write`） | 延后 |
+| Q3.7 测试形态 | **mock api 单测**（α 方案）：mock `OpenClawPluginApi`，断言 `register()` 内 `registerTool` 的调用次数与 names（单一情形：一次调用对应一次注册） | 不需覆盖不同 slot 组合因为无条件注册 |
+| Q3.8 会话可见性过滤 | **应用层复用**（Task 11）：search tool 内部调 `filterMemorySearchHitsBySessionVisibility`；**backend 侧 expr 原生过滤**推到 Task 16 | 两层方案分阶段 |
+
+**Task 11 工程动作清单**：
+
+1. `extensions/memory-core/index.ts` — **不动**（现有无条件注册 memory_search/memory_get 即为正确行为，由 slots.ts disable 其他插件不走到此分支）
+2. `extensions/memory-milvus/index.ts` — `register()` 内**无条件**注册 `memory_search` / `memory_get`（与现有 `memory_write` 风格一致）
+3. `extensions/memory-milvus/src/tools.search.test.ts` — mock api 验证 register() 被调用后三个工具均被注册（names 正确 / 调用次数 = 3）
+4. `extensions/memory-milvus/src/schema.ts` — 新增 `FIELD_LAST_RECALLED_AT` 字段常量（β 方案）
+5. `extensions/memory-milvus/src/search.ts` — 新增 `MilvusSearchManager.get(id)` 实现 + `recordRecall` hook 调用点接入
+
+**与 slots.ts 的信赖边界**：本决策不介入 slot 预处理机制本身；若未来 slots.ts 语义变更，影响面收敛到核心模块，不沿 memory 系插件扩散。
+
+## 14. `MilvusSearchManager.get(id)` 实施细节决策（Q4）
+
+**背景**：SDK `MemoryDataBackend.get(id): Promise<MemoryEntry>`（`packages/memory-host-sdk/src/host/types.ts` L160）已声明，待 memory-milvus 实现。当前 `MilvusSearchManager.readFile(relPath, from?, lines?)` 是为兼容旧 `MemorySearchManager` 接口（已 `@deprecated`）保留的入口，**Task 11 后会变孤儿但暂不可删**（接口契约约束，等 Q10 治理）。
+
+**Q4 子项决策表**：
+
+| 子项 | 决策 | 备注 |
+|------|------|------|
+| Q4.1 实现关系 | **B 独立新写**：`get(id)` 全新实现，`readFile` 维持现状不动 | 两者并存到 Q10 |
+| Q4.2 `output_fields` 范围 | **一次性取全 12 字段**（含 §13.2 新增 `last_recalled_at`） | 简单可靠，性能差异可忽略 |
+| Q4.3 not found 行为 | **`throw new Error("Memory entry not found: ${id}")`** | 与 `readFile` / memory-core `manager.get` 一致；SDK 签名 `Promise<MemoryEntry>` 不允许 null |
+| Q4.4 closed 状态 | **`throw new Error("MilvusSearchManager is closed")`** | 与现有 search/write/readFile/recordRecall 全一致 |
+| Q4.5 degraded 状态 | **throw**（不查 fallback ndjson） | fallback 是 write-only 兜底无 id 索引；Q6 时再统一 |
+| Q4.6 `readFile` 去留 | **保留**（接口契约约束），Task 11 不动；Q10 删除 | 见下文清理路径 |
+| Q4.7 测试形态 | mock `client.get` 单测（命中/空/异常/closed 四态）+ live 写-取回归（skipIf 保护） | 单测不依赖 Milvus |
+| Q4.8 `from`/`lines` 切片 | **不支持**，返回完整 entry；切片由调用方处理 | `MemoryEntry` 无切片字段 |
+
+**`get(id)` 必须查询的 Milvus 字段（12 个）**：
+
+| 类型 | 字段常量 | `MemoryEntry` 映射 |
+|------|---------|---------|
+| 必返回 | `FIELD_ID` / `FIELD_TEXT` / `FIELD_PROVENANCE_KIND` / `FIELD_PROVENANCE_LABEL` | `id` / `text` / `provenance.kind` / `provenance.label` |
+| 可选 | `FIELD_SNIPPET` / `FIELD_AGENT_ID` / `FIELD_SESSION_KEY` / `FIELD_MEMORY_TYPE` / `FIELD_RECALL_COUNT` / `FIELD_CREATED_AT` / `FIELD_UPDATED_AT` | 同名映射 |
+| β 新增 | `FIELD_LAST_RECALLED_AT`（§13.2） | （MemoryEntry 暂无对应字段，先取不映射，等 SDK 扩） |
+
+**`readFile` 与 `get(id)` 命运对照**：
+
+| 阶段 | `readFile` 状态 | `get(id)` 状态 |
+|------|---------|---------|
+| Task 11 之前（当前） | 活代码（`memory-core/tools.ts` L496 调用） | 不存在 |
+| Task 11 之后 | 半死代码（无调用方，但 `implements MemorySearchManager` 强制保留） | 主入口（memory-milvus 自注册的 `memory_get` 工具调用） |
+| Q10 治理后 | 删除（`MilvusSearchManager` 不再 `implements MemorySearchManager`） | 唯一入口 |
+
+**`get(id)` 不触发 `recordRecall`** —— §13.1 已明确触发时机仅为 `memory_search` 命中后（与 memory-core 行为一致），`get(id)` 是按 PK 直查不计入召回统计。
+
+## 15. Task 11 期间 BM25 / 混合检索算法范围（Q5）
+
+**背景**：BM25 优先决策已锁（决策记忆 + §8.1）；`@zilliz/milvus2-sdk-node` v2.4.11 不支持代码创建 BM25 Function，过渡方案 `ANN + scalar filter + 客户端 TF-IDF + 加权融合 + MMR + 时间衰减`已在 Task 9 完成。
+
+**Q5 核心结论**：Task 11 **完全不动 `search.ts` 检索算法**，仅在工具壳层包装。
+
+**Q5 子项决策表**：
+
+| 子项 | 决策 |
+|------|------|
+| Q5.1 是否动算法 | **不动**。Task 11 仅把现有 `manager.search()` 包装成 `memory_search` 工具 |
+| Q5.2 TF-IDF 实现细节 | **不对 AI 暴露**（工具描述只说"混合检索"），仅源码注释 + decisions §8.1 标注 |
+| Q5.3 BM25 自动检测 | **Task 11 不做**，未来需要时配置项手动 toggle，推 Task 16 |
+| Q5.4 融合权重 w1 / w2 | Task 11 不动，保留 Task 9 既定值；参数化推 Task 16 |
+| Q5.5 `extractKeywords` 算法 | Task 11 不动，复用现有实现；Q10 治理时统一 |
+| Q5.6 BM25 切换运维文档 | Task 11 不写，Task 16 / 真有切换需求时再补 |
+| Q5.7 Task 11 测试范围 | **仅工具壳层**：mock `manager.search` → 校验 `MemoryReference[]` 透传 / 字段映射 / `recordRecall` hook 调用 / 会话可见性过滤；不重测算法 |
+| Q5.8 与 §13.2 `last_recalled_at` 互动 | **正交**，BM25 升级仅扩 `sparse_bm25` 字段 + 改 search 路径，不影响 |
+
+**BM25 升级路径**（保留 §8.1 TODO，移交 Task 16）：
+
+> 当 Milvus ≥ 2.4 部署且服务端已创建 BM25 Function 后：
+> 1. `searchKeyword()` 的 `query(filter)` → `hybridSearch({ data:[{anns_field:"sparse_bm25"}], rerank: WeightedRanker(...) })`
+> 2. 删除客户端 TF-IDF 计算（`computeTfIdfScores` / `extractKeywords` / `buildKeywordFilter`）
+> 3. schema.ts 新增 `FIELD_SPARSE_BM25` + 索引声明
+> 4. 跑 `pnpm test extensions/memory-milvus` 回归
+
+## 16. degraded 状态下方法行为统一（Q6）
+
+**背景**：`MilvusSearchManager.degraded` 属性（search.ts L240）在启动时 `ensureCollectionReady` 失败即置 true（§12.6），但当前只有 `write()` 主动检查 degraded 走 fallback（L516），`search()` / `readFile()` 未检查，会发请求失败冒泡。Task 11 需把 `search()` 与新增 `get(id)` 行为对齐已有决策。
+
+**三分法原则**：
+
+| 语义 | 行为 | 适用方法 |
+|------|------|---------|
+| 可容忍丢失（读） | **静默降级**，返回空 | `search()` |
+| 可容忍丢失（埋点） | **直接丢 + warn** | `recordRecall()` |
+| 必须零丢失（写） | **fallback 兜底** | `write()` |
+| 强一致读（按 PK） | **throw** | `get(id)` |
+
+**Q6 子项决策表**：
+
+| 子项 | 现状 | 决策 | 依据 |
+|------|------|------|------|
+| Q6.1 `search()` degraded | 未检查，请求冒泡 | **`return []`** + 首次 warn（放 `if (this.closed) return []` 之后） | 与 L238 注释一致；AI 调 search 不被底层故障中断 |
+| Q6.2 `search()` closed | `return []` | **保持不变** | 向后兼容 Task 9 |
+| Q6.3 `recordRecall()` degraded | Task 11 仍 warn-only | Task 12 落库时加 `if (this.degraded) return` + warn | §12.7 "直接丢"一致 |
+| Q6.4 `write()` degraded | 走 fallback | **不动** | §12.5 / §12.6 |
+| Q6.5 `get(id)` degraded | —— | **throw** | §14 Q4.5 已定 |
+| Q6.6 `readFile()` degraded | 未检查 | **不动**（Task 11 后孤儿） | §14 Q4.6 |
+
+**Task 11 工程动作清单（Q6 追加）**：
+
+1. `extensions/memory-milvus/src/search.ts` — `search()` 方法在 `if (this.closed) return [];` 之后新增 `if (this.degraded) { warnOnce("..."); return []; }`
+2. `extensions/memory-milvus/src/search.test.ts` — 新增 degraded case：构造 `degraded:true` manager，断言 `search()` 返回 `[]` 且**未调用** `client.search`
+
+## 17. 多 corpus 支持范围（Q7）
+
+**背景**：memory-core `memory_search` / `memory_get` 已有 `corpus: "memory" | "wiki" | "all" | "sessions"` 参数（`tools.shared.ts` L34-50），通过 `registerMemoryCorpusSupplement` 动态注册（`memory-wiki` 典型注册者）。memory-milvus 当前零 corpus 痕迹。§13.4 锁定 slot=memory-milvus 时 memory-milvus 自注册工具，需决策 corpus 范围。
+
+**核心原则**：**schema 对齐 + 能力最小化**——所有参数与 memory-core `MemorySearchSchema` / `MemoryGetSchema` 一对一，AI 切换 slot 无感知；某些值行为受限时**返空 + warnOnce**，不 throw。
+
+**Q7 子项决策表**：
+
+| 子项 | 决策 | Task |
+|------|------|------|
+| Q7.1 暴露 corpus 参数 | **暴露**（schema 与 memory-core 一对一）4 值全列 | Task 11 |
+| Q7.2 `corpus=memory`（默认）/ undefined | **正常查询**（不过滤 `memory_type`） | Task 11 |
+| Q7.3 `corpus=sessions` | **返回空 + warnOnce**（`"corpus=sessions not yet supported in milvus backend"`） | Task 11 占位 |
+| Q7.4 `corpus=wiki` | **返回空 + warnOnce**（`"wiki supplement integration deferred"`），不调 `searchMemoryCorpusSupplements` | Task 11 占位 |
+| Q7.5 `corpus=all` | **退化为 `corpus=memory`** + warn "wiki part deferred" | Task 11 占位 |
+| Q7.6 Task 11 工程边界 | schema 完整暴露；仅 `memory` / undefined 走完整 milvus 查询；其余 3 值降级占位 | Task 11 |
+| Q7.7 Schema 对齐原则 | **与 memory-core `MemorySearchSchema` / `MemoryGetSchema` 一对一** | Task 11 |
+| Q7.8 `memory_get` corpus | schema 暴露但**实际忽略**（按 PK 查 corpus 无义） | Task 11 |
+
+**边界问题（Task 16 待定）**：
+
+- `corpus=sessions` 真正支持：milvus 存 session 转录条目方案 + `memory_type="session"` 或新字段 + 查询时按会话过滤
+- `corpus=wiki` 真正支持：milvus 工具接入 `searchMemoryCorpusSupplements` / `getMemoryCorpusSupplementResult` 机制，与 milvus 命中融合排序
+- `corpus=all` 真正支持：milvus + wiki supplement 并查后统一打分并多路融合
+
+**Task 11 工程动作清单（Q7 追加）**：
+
+1. `extensions/memory-milvus/src/tools.search.ts`（新建） / `tools.ts` — schema **复刻** memory-core `MemorySearchSchema` 结构（AGENTS 规范禁止跨插件 import `memory-core/src/**`），以 `tools.shared.ts` L34-50 为唯一参考，字段名 / 类型 / 默认值 / 可选性严格一对一；SDK 级别抽取共享评估合并入§18.Q9.7 三选移交 Task 16
+2. `tools.search.ts` — `corpus` 分支处理：`memory`/undefined → `manager.search()`；`sessions`/`wiki`/`all` → `warnOnce` + 返回空结果
+3. `extensions/memory-milvus/src/tools.search.test.ts` — 覆盖 4 种 corpus 值与 undefined 的一致性，添加**schema 与 memory-core 定义字段集一致性断言**（反向守护：防止未来 memory-core 改 schema 后 milvus 侧遗漏同步）
+
+## 18. citation 装饰 pipeline 范围（Q9）
+
+**背景**：memory-core 的 citation 是**后处理装饰**（`tools.citations.ts` `decorateCitations` · `formatCitation`），基于 `provenance.label` 在 snippet 后追加 `\n\nSource: ...`，受 `cfg.memory.citations: "on"|"off"|"auto"` 控制。memory-milvus `MemoryReference` 底层已携 `provenance: { kind: "milvus", label }`，**但装饰 pipeline 不可复用**（AGENTS 规范禁止跨插件 import `memory-core/src/**`）。
+
+**核心原则**：Task 11 **不在 milvus 插件里重复 / 实现 citation 装饰**，保证 Alpha 范围不膨胀；MemoryReference 原样透传，完整 citation 能力（含 SDK 共享抽取评估）移交 Task 16。
+
+**Q9 子项决策表**：
+
+| 子项 | 决策 | Task |
+|------|------|------|
+| Q9.1 Task 11 是否装饰 citation | **不装饰**（跨插件 import 禁止 + 不复刻） | Task 11 |
+| Q9.2 `cfg.memory.citations` 是否生效 | **不读取**，配置保留但对 milvus 无效果 | Task 11 |
+| Q9.3 citation 字段位置 | N/A（Task 11 不装饰）；Task 16 多件 memory-core：snippet 追加 | Task 16 |
+| Q9.4 `auto` 模式（direct/group） | 推 Task 16（需 `agentSessionKey` 解析） | Task 16 |
+| Q9.5 `formatCitation` 复用方式 | 推 Task 16（评估 SDK 共享抽取） | Task 16 |
+| Q9.6 Task 11 工程范围 | 零装饰 + warnOnce + MemoryReference 原样透传 | Task 11 |
+| Q9.7 SDK 共享抽取方案 | Task 16 评估三选：X（提到 `packages/memory-host-sdk`）/ Y（memory-core runtime-api 导出）/ Z（milvus 复刻，不推荐） | Task 16 |
+
+**Task 11 工程动作清单（Q9 追加）**：
+
+1. `extensions/memory-milvus/src/tools.search.ts` — `memory_search` 返回 `MemoryReference[]` 原样，**不**调用任何 citation 装饰函数
+2. `tools.search.ts` — 首次命中时 `warnOnce("citations rendering not yet supported in milvus backend; deferred to Task 16")`
+3. `tools.search.test.ts` — 断言返回 `MemoryReference` 不含追加的 `\n\nSource:` 后缀（证明原样透传）
+
+**与§13.4（工具注册互斥）的关系**：slot=memory-milvus 时 memory-core 不注册 `memory_search`，装饰 pipeline 随之不发生；本决策只是完整锁定“milvus 侧也不装饰”的语义。
+

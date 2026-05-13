@@ -24,8 +24,15 @@ import {
   FIELD_CREATED_AT,
   FIELD_EMBEDDING,
   FIELD_ID,
+  FIELD_LAST_RECALLED_AT,
+  FIELD_MEMORY_TYPE,
+  FIELD_PROVENANCE_KIND,
+  FIELD_PROVENANCE_LABEL,
+  FIELD_RECALL_COUNT,
+  FIELD_SESSION_KEY,
   FIELD_SNIPPET,
   FIELD_TEXT,
+  FIELD_UPDATED_AT,
   OUTPUT_FIELDS,
   entryToInsertData,
   rowToMemoryEntry,
@@ -38,6 +45,7 @@ import {
   MEMORY_TYPES,
 } from "./types.js";
 import { replayFallback, writeFallback } from "./fallback.js";
+import { warnOnce } from "./warn-once.js";
 
 // ── 配置类型 ──────────────────────────────────────────────────────
 
@@ -265,6 +273,10 @@ export class MilvusSearchManager {
     },
   ): Promise<MemoryReference[]> {
     if (this.closed) return [];
+    if (this.degraded) {
+      warnOnce("degraded-search", "search skipped: manager is in degraded mode");
+      return [];
+    }
     const maxResults = opts?.maxResults ?? DEFAULT_MAX_RESULTS;
     const minScore = opts?.minScore ?? DEFAULT_MIN_SCORE;
     const effectiveAgentId = opts?.agentId ?? this.agentId;
@@ -478,6 +490,47 @@ export class MilvusSearchManager {
       lines,
       nextFrom: lines !== undefined ? from + lines : undefined,
     };
+  }
+
+  // ── get(id) — MemoryDataBackend.get ───────────────────────────
+
+  /**
+   * 按 id 查询 PK → MemoryEntry。
+   * 一次性取全 13 个字段（含 β last_recalled_at）。
+   * not-found / closed / degraded → throw。
+   * 不触发 recordRecall（按 PK 直查不计入召回统计）。
+   */
+  async get(id: string): Promise<MemoryEntry> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) throw new Error("MilvusSearchManager is in degraded mode");
+
+    const rawId = id.trim();
+    if (!rawId) throw new Error("Missing memory id");
+
+    const response = await this.client.get({
+      collection_name: this.collectionName,
+      ids: [rawId],
+      output_fields: [
+        FIELD_ID,
+        FIELD_TEXT,
+        FIELD_SNIPPET,
+        FIELD_AGENT_ID,
+        FIELD_SESSION_KEY,
+        FIELD_MEMORY_TYPE,
+        FIELD_RECALL_COUNT,
+        FIELD_PROVENANCE_KIND,
+        FIELD_PROVENANCE_LABEL,
+        FIELD_CREATED_AT,
+        FIELD_UPDATED_AT,
+        FIELD_LAST_RECALLED_AT,
+      ],
+    });
+
+    if (!response.data || response.data.length === 0) {
+      throw new Error(`Memory entry not found: ${rawId}`);
+    }
+
+    return rowToMemoryEntry(response.data[0] as Record<string, unknown>);
   }
 
   // ── 写入（MemoryDataBackend.write） ───────────────────────────

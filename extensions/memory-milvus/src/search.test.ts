@@ -286,3 +286,74 @@ describe("MilvusSearchManager.recordRecall: 占位", () => {
     warnSpy.mockRestore();
   });
 });
+
+// ── search degraded 降级 ───────────────────────────────────────
+
+describe("MilvusSearchManager.search: degraded 降级", () => {
+  it("degraded=true 时 search 返回 []，不调 client", async () => {
+    const client = makeClient();
+    const provider = makeProvider();
+    const manager = new MilvusSearchManager(
+      client,
+      "test_collection",
+      provider,
+      "agent-1",
+      makeConfig(),
+      "/tmp/test-workspace",
+      { degraded: true },
+    );
+
+    const results = await manager.search("test query");
+    expect(results).toEqual([]);
+  });
+});
+
+// ── get(id) 四态 ──────────────────────────────────────────────
+
+describe("MilvusSearchManager.get", () => {
+  it("found → 返回 MemoryEntry", async () => {
+    const row = {
+      id: "42",
+      text: "Hello world",
+      snippet: "Hello...",
+      agent_id: "agent-1",
+      session_key: "sess-1",
+      memory_type: "short_term",
+      recall_count: "3",
+      provenance_kind: "milvus",
+      provenance_label: "chat_extract",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-13T00:00:00.000Z",
+      last_recalled_at: "",
+    };
+    const client = { get: vi.fn().mockResolvedValue({ data: [row] }) } as unknown as MilvusClient;
+    const manager = createManager({ client });
+
+    const entry = await manager.get("42");
+    expect(entry.id).toBe("42");
+    expect(entry.text).toBe("Hello world");
+    expect(entry.snippet).toBe("Hello...");
+    expect(entry.recallCount).toBe(3);
+    expect(entry.provenance.kind).toBe("milvus");
+  });
+
+  it("not found → throw", async () => {
+    const client = { get: vi.fn().mockResolvedValue({ data: [] }) } as unknown as MilvusClient;
+    const manager = createManager({ client });
+
+    await expect(manager.get("999")).rejects.toThrow("Memory entry not found");
+  });
+
+  it("closed → throw", async () => {
+    const manager = createManager();
+    await manager.close();
+
+    await expect(manager.get("1")).rejects.toThrow("MilvusSearchManager is closed");
+  });
+
+  it("degraded → throw", async () => {
+    const manager = createManager({ degraded: true });
+
+    await expect(manager.get("1")).rejects.toThrow("degraded mode");
+  });
+});
