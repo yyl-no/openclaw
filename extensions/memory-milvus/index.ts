@@ -28,6 +28,7 @@ import {
   type MilvusSearchConfig,
 } from "./src/search.js";
 import { ensureCollectionReady } from "./src/collection-bootstrap.js";
+import { createMemoryWriteTool } from "./src/tools.js";
 
 // ── Prompt Builder ─────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ function buildPromptSection(params: {
   const tools: string[] = [];
   if (params.availableTools.has("memory_search")) tools.push("memory_search");
   if (params.availableTools.has("memory_get")) tools.push("memory_get");
+  if (params.availableTools.has("memory_write")) tools.push("memory_write");
 
   if (tools.length === 0) return [];
 
@@ -52,6 +54,7 @@ function buildPromptSection(params: {
     "",
     "- Use `memory_search` for semantic search across all indexed memories.",
     "- Use `memory_get` with a numeric id to read the full content of a specific memory entry.",
+    "- Use `memory_write` to persist extracted memories with a text and optional source label.",
     "- Memory entries can be `short_term`, `long_term`, or `archived`.",
   ];
 }
@@ -233,6 +236,11 @@ export default definePluginEntry({
       promptBuilder: buildPromptSection,
       flushPlanResolver: buildMilvusFlushPlan,
       runtime: milvusRuntime,
+    });
+
+    // memory_write 工具：AI flush turn 调此写入，内部走 Manager.write()
+    api.registerTool(() => createMemoryWriteTool({ getManager: () => activeManager }), {
+      names: ["memory_write"],
     });
 
     // memory_search / memory_get 工具由 Task 11 注册

@@ -5,7 +5,7 @@
   },
   "kind": "memory",
   "contracts": {
-    "tools": ["memory_get", "memory_search"]
+    "tools": ["memory_write", "memory_get", "memory_search"]
   },
   "uiHints": {
     "milvus.host": {

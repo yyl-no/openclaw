@@ -440,3 +440,37 @@
 5. **embed/insert 异常** → `fallbackWrite()` 兜底
 
 **fixup**（2026-05-13）：`search.test.ts` 中三处 provider mock 的 `dimensions: 1024` 多余字段清理——`MemoryEmbeddingProvider` 接口不含 `dimensions` 属性，改补 `id`+`model` 必选字段。
+
+---
+
+### S5 · AI 调用链端到端打通（2026-05-13）
+
+**改动文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `extensions/memory-milvus/src/tools.ts`（新建，102行） | `createMemoryWriteTool` 工厂：schema `{text, label?}`，校验→manager.write()，5种错误路径覆盖 |
+| `extensions/memory-milvus/src/tools.test.ts`（新建，173行） | 9 单测：合法写入 / 默认label / 非法label / text为空 / text缺失 / manager null / write内部异常 / user_manual / 返回结构 |
+| `extensions/memory-milvus/index.ts`（+8行） | 导入 `createMemoryWriteTool`；`register()` 中注册 `memory_write` 工具；`buildPromptSection` 新增 `memory_write` 说明行 |
+| `extensions/memory-milvus/openclaw.plugin.json`（+1/-1） | `contracts.tools` 增加 `"memory_write"` |
+| `src/agents/pi-tools.ts`（+1/-1） | `MEMORY_FLUSH_ALLOWED_TOOL_NAMES` 白名单新增 `"memory_write"` |
+
+**S5-1 工具注册**：
+- `memory_write` 工具：`{ name:"memory_write", label:"memory_write", parameters:{text(required), label(optional, default chat_extract)} }`
+- `label` 枚举取自 `MEMORY_SOURCE_LABELS` 常量值，`assertValidSourceLabel` 越界即返回错误
+- 通过闭包持有 `activeManager` getter，manager null → 返回明确初始化错误
+- `api.registerTool(..., { names: ["memory_write"] })` 注册
+
+**S5-2 白名单**：
+- `MEMORY_FLUSH_ALLOWED_TOOL_NAMES` → `Set(["read", "write", "memory_write"])`
+- **不变式确认**：`memory_write` tool.name ≠ `"write"`，不进入 `wrapToolMemoryFlushAppendOnlyWrite` 分支，原样传给 AI flush turn
+- 文件后端 `write` 工具行为零变更
+
+**S5-3 Prompt 对齐**：
+- `buildMilvusFlushPlan` 已含 `"Write each memory using \`memory_write\`."` ✅
+- `buildPromptSection` 新增 `"- Use \`memory_write\` to persist extracted memories..."` ✅
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 5 files, **58 tests** passed（+9 tools.test）
+- `pnpm tsgo:extensions` → memory-milvus **零错误**（仅 memory-core 11 预存）
+- `pnpm build` → 全绿
