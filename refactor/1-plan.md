@@ -304,6 +304,8 @@ type MemoryFlushPlan = {
 
 ### Task 11: 重写 memory_search / memory_get（含 recordRecall hook）
 
+> **状态**：✅ 完成于 2026-05-13
+
 > **注**：`memory_recall` 是召回追踪机制的描述名词，**不是 AI 工具**；AI 可见工具仅 `memory_search` + `memory_get` + `memory_write`。详见 decisions §13.1。
 
 - `memory_search`：Milvus ANN + BM25 混合检索 → `MemoryReference[]`，命中后内部触发 `recordRecall` hook（manager 实现仍为 warn 占位，落库由 Task 12 完成）
@@ -395,10 +397,19 @@ type MemoryFlushPlan = {
 
 ### Task 12: 重写 Short-term Recall Tracking
 
-- 替代 `short-term-recall.json`
-- `MilvusSearchManager.recordRecall` 真实落库：`query + upsert` 两步，同步更新 `recall_count += 1` 与 `last_recalled_at = now()`
+> **状态**：✅ 完成于 2026-05-13
+
+- 替代 `short-term-recall.json`（仅当 slot=`memory-milvus` 时；`memory-core` 文件后端路径不动）
+- `MilvusSearchManager.recordRecall` 真实落库：`query + upsert` 两步（Milvus 平台约束，不支持原子 update），同步更新 `recall_count += 1` 与 `last_recalled_at = now()`
 - 触发时机：每次 `memory_search` **命中后**（不是 `memory_get`，与 memory-core 行为一致）
-- 详见 decisions §13.3
+- **接口签名**：沿用 H 方案 A2/A4 已锁定的 `recordRecall(refs: MemoryReference[], context?: { query; timezone? })`，无须再改 SDK
+- **批量策略**：单次 `client.query(ids=...)` 取全字段 → 内存累加 `recall_count` + 写入 `last_recalled_at` → 单次 `client.upsert(rows)`；N 条命中 1 次往返
+- **失败策略**（详见 decisions §12.7）：失败直接丢 + warnOnce，**不走 fallback**（召回埋点可丢，与写入兜底区别对待）
+- **context 处理**：`query` / `timezone` Alpha 不落库（schema 无对应列）；`queryHashes` 等 9 维信号推 Task 16（详见 decisions §13.2）
+- **Task 11 衔接**：替换 `MilvusSearchManager.recordRecall` warn 占位为真实实现；`tools.search.ts` 命中 hook 调用点保持不变
+- **测试**：mock client query+upsert 链路（命中累加 / 空 refs 短路 / closed-degraded throw 透传 / upsert 失败 warn 不抛）；live 测试在 Task 13 端到端回归时统一补
+- **Alpha 退出半步**：本任务完工后 `recordRecall` 不再 warn，但 `experimental` / `alpha` 标记仍保留；Task 13 完工撤下
+- 详见 decisions §13.3 / §12.7 / §13.2
 
 ### Task 13: 重写 Dreaming Promotion
 

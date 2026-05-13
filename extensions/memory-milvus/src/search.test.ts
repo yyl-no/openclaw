@@ -56,10 +56,12 @@ function makeProvider(): MemoryEmbeddingProvider {
   } as unknown as MemoryEmbeddingProvider;
 }
 
-function makeClient(overrides?: Partial<Record<"describeCollection" | "insert", ReturnType<typeof vi.fn>>>): MilvusClient {
+function makeClient(overrides?: Partial<Record<"describeCollection" | "insert" | "query" | "upsert" | "get", ReturnType<typeof vi.fn>>>): MilvusClient {
   return {
     describeCollection: vi.fn().mockResolvedValue({}),
     insert: vi.fn().mockResolvedValue({ IDs: { int_id: { data: [42] } } }),
+    query: vi.fn().mockResolvedValue({ data: [] }),
+    upsert: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as MilvusClient;
 }
@@ -264,26 +266,173 @@ describe("MilvusSearchManager.write: 健康探测失败", () => {
   });
 });
 
-// ── recordRecall 占位 ────────────────────────────────────────────
+// ── recordRecall 正式实现 ────────────────────────────────────
 
-describe("MilvusSearchManager.recordRecall: 占位", () => {
-  it("调用不抛错，仅 console.warn", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const manager = createManager();
+describe("MilvusSearchManager.recordRecall", () => {
+  const makeRefs = (ids: string[]): MemoryReference[] =>
+    ids.map((id) => ({
+      id,
+      snippet: `snippet-${id}`,
+      score: 0.8,
+      provenance: { kind: "milvus" as const, label: "chat_extract" },
+    }));
 
-    const refs: MemoryReference[] = [
-      { id: "1", snippet: "test", score: 0.5, provenance: { kind: "milvus", label: "chat_extract" } },
-    ];
+  const makeQueryRow = (id: string, recallCount = 0): Record<string, unknown> => ({
+    id,
+    text: `text-${id}`,
+    snippet: `snippet-${id}`,
+    agent_id: "agent-1",
+    session_key: "sess-1",
+    memory_type: "short_term",
+    recall_count: recallCount,
+    provenance_kind: "milvus",
+    provenance_label: "chat_extract",
+    created_at: "2025-01-01T00:00:00.000Z",
+    updated_at: "2025-01-01T00:00:00.000Z",
+    last_recalled_at: "",
+  });
+
+  it("空 refs → 不调 client，直接返回", async () => {
+    const client = makeClient();
+    const manager = createManager({ client });
+
+    await manager.recordRecall([]);
+
+    expect(client.query).not.toHaveBeenCalled();
+    expect(client.upsert).not.toHaveBeenCalled();
+  });
+
+  it("closed → throw", async () => {
+    const client = makeClient();
+    const manager = createManager({ client });
+    // force closed
+    await (manager as unknown as { close(): Promise<void> }).close();
 
     await expect(
-      manager.recordRecall(refs, { query: "test", timezone: "UTC" }),
-    ).resolves.toBeUndefined();
+      manager.recordRecall(makeRefs(["1"])),
+    ).rejects.toThrow("MilvusSearchManager is closed");
+  });
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      "[memory-milvus] recordRecall not yet implemented (Task 12)",
+  it("degraded → warnOnce 后 return，不调 client", async () => {
+    const client = makeClient();
+    const manager = new MilvusSearchManager(
+      client,
+      "test_collection",
+      makeProvider(),
+      "agent-1",
+      makeConfig(),
+      "/tmp/test-workspace",
+      { degraded: true },
     );
 
-    warnSpy.mockRestore();
+    await manager.recordRecall(makeRefs(["1"]));
+
+    expect(client.query).not.toHaveBeenCalled();
+    expect(client.upsert).not.toHaveBeenCalled();
+  });
+
+  it("正常路径：命中累加 recall_count + last_recalled_at", async () => {
+    const querySpy = vi.fn().mockResolvedValue({
+      data: [makeQueryRow("1", 2), makeQueryRow("2", 0)],
+    });
+    const upsertSpy = vi.fn().mockResolvedValue({});
+
+    const client = makeClient({
+      query: querySpy,
+      upsert: upsertSpy,
+    });
+
+    const manager = createManager({ client });
+
+    const before = Date.now();
+    await manager.recordRecall(makeRefs(["1", "2"]));
+    const after = Date.now();
+
+    // 第一步：query 当前字段
+    expect(querySpy).toHaveBeenCalledOnce();
+    expect(querySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        collection_name: "test_collection",
+        filter: "id in [1,2]",
+        limit: 2,
+      }),
+    );
+
+    // 第二步：upsert 累加后的值
+    expect(upsertSpy).toHaveBeenCalledOnce();
+    const upsertArg = upsertSpy.mock.calls[0][0];
+    expect(upsertArg.collection_name).toBe("test_collection");
+    const rows = upsertArg.data as Record<string, unknown>[];
+    expect(rows).toHaveLength(2);
+
+    // id=1 原有 recall_count=2 → 3
+    const row1 = rows.find((r) => r.id === "1")!;
+    expect(row1.recall_count).toBe(3);
+    const t1 = row1.last_recalled_at as string;
+    expect(new Date(t1).getTime()).toBeGreaterThanOrEqual(before);
+    expect(new Date(t1).getTime()).toBeLessThanOrEqual(after);
+    expect(row1.text).toBe("text-1"); // 保留原字段
+    expect(row1.created_at).toBe("2025-01-01T00:00:00.000Z");
+
+    // id=2 原有 recall_count=0 → 1
+    const row2 = rows.find((r) => r.id === "2")!;
+    expect(row2.recall_count).toBe(1);
+    const t2 = row2.last_recalled_at as string;
+    expect(new Date(t2).getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("refs 中存在不存在于 milvus 的 id 时仍正常累加（prevCount=0）", async () => {
+    const querySpy = vi.fn().mockResolvedValue({
+      data: [makeQueryRow("1", 5)], // 只有 id=1 在 db 中
+    });
+    const upsertSpy = vi.fn().mockResolvedValue({});
+
+    const client = makeClient({ query: querySpy, upsert: upsertSpy });
+    const manager = createManager({ client });
+
+    await manager.recordRecall(makeRefs(["1", "missing-id"]));
+
+    const rows = upsertSpy.mock.calls[0][0].data as Record<string, unknown>[];
+    expect(rows).toHaveLength(2);
+
+    // id=1: 5+1=6
+    expect(rows.find((r) => r.id === "1")!.recall_count).toBe(6);
+    // missing-id: 0+1=1，且不保留原字段（无 existing）
+    const missing = rows.find((r) => r.id === "missing-id")!;
+    expect(missing.recall_count).toBe(1);
+    expect(missing.text).toBeUndefined();
+  });
+
+  it("upsert 失败 → warnOnce 不抛", async () => {
+    const querySpy = vi.fn().mockResolvedValue({
+      data: [makeQueryRow("1", 1)],
+    });
+    const upsertSpy = vi.fn().mockRejectedValue(new Error("gRPC timeout"));
+
+    const client = makeClient({ query: querySpy, upsert: upsertSpy });
+    const manager = createManager({ client });
+
+    await expect(
+      manager.recordRecall(makeRefs(["1"])),
+    ).resolves.toBeUndefined();
+
+    // query 仍被调用
+    expect(querySpy).toHaveBeenCalledOnce();
+    // upsert 失败不抛
+  });
+
+  it("query 失败 → warnOnce 不抛（整体链路容错）", async () => {
+    const querySpy = vi.fn().mockRejectedValue(new Error("connection lost"));
+    const upsertSpy = vi.fn();
+
+    const client = makeClient({ query: querySpy, upsert: upsertSpy });
+    const manager = createManager({ client });
+
+    await expect(
+      manager.recordRecall(makeRefs(["1"])),
+    ).resolves.toBeUndefined();
+
+    expect(upsertSpy).not.toHaveBeenCalled();
   });
 });
 

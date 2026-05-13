@@ -665,17 +665,103 @@ export class MilvusSearchManager {
     };
   }
 
-  // ── recordRecall 占位 ─────────────────────────────────────────
+  // ── recordRecall 正式实现 ───────────────────────────────────
 
   /**
-   * TODO(Task 12): replace with real milvus recall_count update.
-   * 当前仅 warn，不做任何持久化。
+   * 批量更新召回计数：query 取当前字段 → 内存累加 recall_count + 写入
+   * last_recalled_at → upsert 回 Milvus。
+   *
+   * 失败策略（§12.7）：失败直接 warnOnce 丢弃，不走 fallback（召回埋点可丢）。
+   * 不触发时机：空 refs 短路 / degraded 跳过 / closed 抛错。
    */
   async recordRecall(
-    _refs: MemoryReference[],
+    refs: MemoryReference[],
     _context?: { query: string; timezone?: string },
   ): Promise<void> {
-    console.warn("[memory-milvus] recordRecall not yet implemented (Task 12)");
+    if (!refs.length) return;
+
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) {
+      warnOnce(
+        "milvus:recordRecall:degraded",
+        "[memory-milvus] recordRecall skipped: manager is in degraded mode",
+      );
+      return;
+    }
+
+    const ids = refs.map((r) => r.id).filter(Boolean);
+    if (!ids.length) return;
+
+    try {
+      // Step 1: query 当前字段
+      const queryResponse = await this.client.query({
+        collection_name: this.collectionName,
+        filter: `id in [${ids.join(",")}]`,
+        output_fields: [
+          FIELD_ID,
+          FIELD_RECALL_COUNT,
+          FIELD_TEXT,
+          FIELD_SNIPPET,
+          FIELD_AGENT_ID,
+          FIELD_SESSION_KEY,
+          FIELD_MEMORY_TYPE,
+          FIELD_PROVENANCE_KIND,
+          FIELD_PROVENANCE_LABEL,
+          FIELD_CREATED_AT,
+          FIELD_UPDATED_AT,
+          FIELD_LAST_RECALLED_AT,
+        ],
+        limit: ids.length,
+      });
+
+      const existingMap = new Map<string, Record<string, unknown>>();
+      for (const row of (queryResponse.data ?? []) as Record<string, unknown>[]) {
+        existingMap.set(String(row[FIELD_ID] ?? ""), row);
+      }
+
+      const now = new Date().toISOString();
+
+      // Step 2: 内存累加 recall_count + last_recalled_at
+      const upsertRows: Record<string, unknown>[] = [];
+      for (const id of ids) {
+        const existing = existingMap.get(id);
+        const prevCount = existing?.[FIELD_RECALL_COUNT] != null
+          ? Number(existing[FIELD_RECALL_COUNT])
+          : 0;
+
+        const row: Record<string, unknown> = {
+          [FIELD_ID]: id,
+          [FIELD_RECALL_COUNT]: prevCount + 1,
+          [FIELD_LAST_RECALLED_AT]: now,
+          [FIELD_UPDATED_AT]: now,
+        };
+
+        // 保留现有字段值（upsert 需提供全部字段，否则可能被清空）
+        if (existing) {
+          row[FIELD_TEXT] = existing[FIELD_TEXT];
+          row[FIELD_SNIPPET] = existing[FIELD_SNIPPET];
+          row[FIELD_AGENT_ID] = existing[FIELD_AGENT_ID];
+          row[FIELD_SESSION_KEY] = existing[FIELD_SESSION_KEY];
+          row[FIELD_MEMORY_TYPE] = existing[FIELD_MEMORY_TYPE];
+          row[FIELD_PROVENANCE_KIND] = existing[FIELD_PROVENANCE_KIND];
+          row[FIELD_PROVENANCE_LABEL] = existing[FIELD_PROVENANCE_LABEL];
+          row[FIELD_CREATED_AT] = existing[FIELD_CREATED_AT];
+        }
+
+        upsertRows.push(row);
+      }
+
+      // Step 3: 单次 upsert 写入
+      await this.client.upsert({
+        collection_name: this.collectionName,
+        data: upsertRows as unknown as RowData[],
+      });
+    } catch (err) {
+      warnOnce(
+        "milvus:recordRecall:upsert-failed",
+        `[memory-milvus] recordRecall upsert failed: ${(err as Error).message}`,
+      );
+    }
   }
 
   // ── 状态 ──────────────────────────────────────────────────────

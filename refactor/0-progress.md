@@ -569,8 +569,8 @@
 
 | 项目 | 说明 | 目标 |
 |------|------|------|
-| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step3 完成（plugin 注册），待 Step4 全量回归 | Task 11 |
-| `recordRecall` 正式实现 | 当前仅 console.warn 占位 | Task 12 |
+| `memory_search` / `memory_get` 工具 | ✅ Task 11 全部完成（schema + manager + 工具层 + 注册 + 90 tests） | Task 11 ✅ |
+| `recordRecall` 正式实现 | ✅ Task 12 完成（query+upsert 两步落库，96 tests 全绿） | Task 12 ✅ |
 | Dreaming promotion（短→长） | Task 13，Alpha 退出条件 | memory-milvus |
 | live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
 | pi-tools 白名单架构下沉 | 当前硬编码，未来多后端时评估 | Task 16+ |
@@ -609,7 +609,48 @@
 | Step 1 Schema+Manager | ✅ |
 | Step 2 工具层 | ✅ |
 | Step 3 Plugin 注册 | ✅ |
-| Step 4 全量回归 | ⬜ |
+| Step 4 全量回归 | ✅ |
+
+### Task 11 完工总结 ✅
+
+**完成日期**：2026-05-13
+
+**工程动作清单**（5 条，对应 decisions §13-§18）：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | Schema 扩展 `last_recalled_at` + warn-once helper | `schema.ts`、`warn-once.ts`（新建）、`collection-bootstrap.ts` |
+| 2 | `MilvusSearchManager.get(id)` + `search()` degraded 降级 | `search.ts` |
+| 3 | `createMemorySearchTool` + `createMemoryGetTool` 工具层 | `tools.search.ts`（新建）、`tools.get.ts`（新建） |
+| 4 | Plugin `register()` 无条件注册三工具 | `index.ts` |
+| 5 | 全量回归 + 文档归档 | `0-progress.md`、`1-plan.md`、`CHANGELOG.md` |
+
+**测试矩阵**：
+
+| 测试文件 | 测试数 | 覆盖 |
+|----------|--------|------|
+| `collection-bootstrap.test.ts` | 8 | 字段集含 `last_recalled_at` |
+| `search.test.ts` | 11 | degraded search + get 四态 |
+| `tools.search.test.ts` | 15 | schema 守护 / 5 种 corpus / recordRecall / citation |
+| `tools.get.test.ts` | 10 | 正常获取 / 异常四态 / 冗余参数忽略 |
+| `register.test.ts` | 2 | registerTool 调用 3 次 / names 顺序 |
+| 其余（types/fallback/tools） | 44 | 既有测试零回归 |
+| **合计** | **90** | |
+
+**风险回顾**：
+- ✅ R1（`OpenClawPluginApi.config` 可读）— 已解除
+- ✅ R4（memory-core/index.ts 注册点）— 已确认，不动
+- ✅ R6（slots.ts 互斥 disable）— 单层信赖，Step3 无条件注册
+- ⚠️ `filterMemorySearchHitsBySessionVisibility` 因 tsconfig rootDir 暂缺，milvus 结果无 session source 故 no-op，Task 16 接入
+- ⚠️ citation 装饰推 Task 16（当前 warnOnce 占位）
+
+**遗留项（明确移交后续 Task）**：
+| 项目 | 移交 |
+|------|------|
+| BM25 原生升级 | Task 16 |
+| 多 corpus 全量支持 | Task 16 |
+| citation 装饰 pipeline | Task 16 |
+| `filterMemorySearchHitsBySessionVisibility` 接入 | Task 16 |
 
 ### Task 11 Step 3: Plugin 注册集成 ✅ 完成
 
@@ -651,3 +692,29 @@
 
 **偏离说明**：
 - `filterMemorySearchHitsBySessionVisibility` 因 tsconfig rootDir 跨插件导入限制，暂缺集成。当前 milvus 结果无 session source 故为 no-op，Task 16 时接入（已留注释）
+
+### Task 12: Short-term Recall Tracking 正式实现 ✅ 完成
+
+**完成日期**：2026-05-13
+
+**工程动作**：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | `recordRecall` 替换 warn 占位为真实 query+upsert 两步落库 | `search.ts` |
+| 2 | 更新 7 个单测覆盖：空 refs / closed / degraded / 正常累加 / 缺失 id / upsert 失败 / query 失败 | `search.test.ts` |
+| 3 | `makeClient` 扩展 query/upsert 默认 spy | `search.test.ts` |
+
+**测试增量**：
+
+| 测试文件 | 变更 | 测试数 |
+|----------|------|--------|
+| `search.test.ts` | 替换"占位"→"正式"（+6 tests） | 17（原 11） |
+| 全量 | 96 passed | +6 |
+
+**实现细节**（依据 decisions §13.3 / §12.7）：
+- 单次 `client.query(filter="id in [...]", output_fields=全12字段)` → 内存累加 `recall_count += 1` + `last_recalled_at = now()` → `client.upsert(rows)`
+- 失败策略：catch → `warnOnce(...)` 不抛（召回埋点可丢，不丢用户记忆主体）
+- degraded 态：warnOnce + return（不调 client）
+- closed 态：throw `"MilvusSearchManager is closed"`
+- context 暂不落库（schema 无对应列）

@@ -6,6 +6,8 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- Memory (Milvus): register `memory_search` and `memory_get` tools backed by Milvus ANN + BM25 hybrid search (Alpha).
+
 - Build: enable stricter Vitest safety lint rules for focused, disabled, conditional, and standalone expectations.
 - Build: pin explicit oxfmt defaults in the shared formatter config to keep formatting behavior stable across upgrades.
 - TypeScript: enable stricter compiler checks for implicit returns, side-effect imports, overrides, and unused production code.
