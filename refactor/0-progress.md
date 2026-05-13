@@ -569,7 +569,7 @@
 
 | 项目 | 说明 | 目标 |
 |------|------|------|
-| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step1 完成（schema + get(id)），待 Step2-4 | Task 11 |
+| `memory_search` / `memory_get` 工具 | 🟡 Task 11 Step2 完成（工具层），待 Step3-4 | Task 11 |
 | `recordRecall` 正式实现 | 当前仅 console.warn 占位 | Task 12 |
 | Dreaming promotion（短→长） | Task 13，Alpha 退出条件 | memory-milvus |
 | live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
@@ -607,6 +607,28 @@
 | 步骤 | 状态 |
 |------|------|
 | Step 1 Schema+Manager | ✅ |
-| Step 2 工具层 | ⬜ |
+| Step 2 工具层 | ✅ |
 | Step 3 Plugin 注册 | ⬜ |
 | Step 4 全量回归 | ⬜ |
+
+### Task 11 Step 2: 工具层（memory_search / memory_get）✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task11 Step2 + `2-decisions.md` §13/§17/§18
+
+**改动文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `extensions/memory-milvus/src/tools.search.ts`（新建） | `createMemorySearchTool(deps)`：schema 与 memory-core 一对一（query/maxResults/minScore/corpus）；corpus 路由（memory/undefined→search；sessions/wiki→空+warnOnce；all→退化为memory+warnOnce）；recordRecall hook；citation warnOnce；MemoryReference 原样透传 |
+| `extensions/memory-milvus/src/tools.get.ts`（新建） | `createMemoryGetTool(deps)`：schema 与 memory-core 一对一（path/from/lines/corpus/id）；仅用 id；不触发 recordRecall；异常透传 |
+| `extensions/memory-milvus/src/tools.search.test.ts`（新建） | 15 tests：schema 字段集守护 + query 必填 + 5 种 corpus 路由 + recordRecall hook（命中/无命中/无方法）+ citation 无装饰 + manager 不可用/异常 |
+| `extensions/memory-milvus/src/tools.get.test.ts`（新建） | 10 tests：正常获取 + id trim + 空id/缺失id 错误 + not-found/closed/degraded 错误 + 不触发 recordRecall + manager 不可用 + 冗余参数忽略 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 7 files, **88 tests** passed（63→88，+25）
+- `pnpm tsgo:extensions` → memory-milvus **0 错误**（11 错误均在 memory-core，全部预存）
+
+**偏离说明**：
+- `filterMemorySearchHitsBySessionVisibility` 因 tsconfig rootDir 跨插件导入限制，暂缺集成。当前 milvus 结果无 session source 故为 no-op，Task 16 时接入（已留注释）
