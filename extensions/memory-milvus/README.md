@@ -49,6 +49,47 @@ Milvus `provenance_label` query. Reverse output goes to `memory-export/<timestam
 | Multi-corpus support (sessions / wiki) | Task 16 |
 | 9-dim advanced recall signals | Task 16 |
 
+## Enable
+
+The `memory-milvus` plugin is mutually exclusive with `memory-core`.
+Set `plugins.slots.memory` to activate it — all other `kind:"memory"`
+plugins are automatically disabled.
+
+```json
+// openclaw.config.json
+{
+  "plugins": {
+    "slots": {
+      "memory": "memory-milvus"
+    },
+    "entries": {
+      "memory-milvus": {
+        "enabled": true,
+        "config": {
+          "milvus": {
+            "host": "localhost",
+            "port": 19530
+          },
+          "embedding": {
+            "provider": "alibaba",
+            "model": "text-embedding-v3"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Switching back to `memory-core`**: change `plugins.slots.memory` to
+`"memory-core"`. Your Milvus data and Markdown files are stored independently —
+neither is lost when you switch.
+
+**Startup verification**: after switching, the gateway startup log will show
+`memory-milvus` among the loaded plugins. If the Milvus server is unreachable,
+the plugin initializes in "degraded" mode (falls back to local ndjson files)
+and logs a warning.
+
 ## Quick start (Docker)
 
 Launch a local Milvus instance:

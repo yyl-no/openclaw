@@ -802,3 +802,49 @@
 
 **遗留移交 Task 16**：
 - `content_hash` schema 字段化 + SDK 去重能力抽取 + 存量数据迁移到 schema 字段去重
+
+---
+
+### Task 15: 接入 memory slot（切换验证 + onboarding）✅ 完成
+
+**完成日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task15 + `2-decisions.md` §6/§11/§13.4
+
+**前提确认**（Task 8/10/11/13 已落地，本任务不重写）：
+- ✅ `kind:"memory"` 插件注册（`openclaw.plugin.json` + `definePluginEntry`）
+- ✅ `MemoryPluginCapability` 三件套（promptBuilder / flushPlanResolver / runtime）
+- ✅ `MemoryPluginRuntime`（getMemorySearchManager / resolveMemoryBackendConfig / closeAllMemorySearchManagers）
+- ✅ `applyExclusiveSlotSelection` 互斥下发机制已生效
+
+**工程动作**：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | P1 核查：审计 loader.ts / memory-state.ts / memory-runtime.ts 冗余双插件防御 | 分析完成，**无冗余代码可删** |
+| 2 | 切换集成测试：3 场景 × 9 用例（A: memory-core / B: memory-milvus / C: none） | `src/plugins/memory-slot-switch.test.ts`（新建，219行） |
+| 3 | Onboarding 配置示例：`## Enable` 小节 + JSON 配置片段 + 切换指引 | `README.md`（+41行） |
+
+**P1 核查结论**（保留原因）：
+| 文件 | 机制 | 保留原因 |
+|------|------|---------|
+| `loader.ts` | `resolveMemorySlotDecision`（4处） | 运行时加载守卫，`applyExclusiveSlotSelection` 仅 CLI install 流程调用，loader 独立加载路径需要此判断 |
+| `memory-state.ts` | `registerMemoryCapability` 单槽设计 | 天生单槽（last writer wins），非双重防御 |
+| `memory-runtime.ts` | `resolveMemoryRuntimePluginIds()` | standalone runtime 加载需要解析 slot 配置 |
+
+**测试矩阵**：
+
+| 测试文件 | 测试数 | 覆盖 |
+|----------|--------|------|
+| `memory-slot-switch.test.ts`（新建） | 9 | 场景 A（2）/ 场景 B（2）/ 场景 C（3）/ 跨兼容不变式（2） |
+| memory-milvus 全量（9 files） | 132 | 零回归 |
+
+**验收证据**：
+- `pnpm test src/plugins/memory-slot-switch.test.ts` → 9 tests passed
+- `pnpm test extensions/memory-milvus` → 132 tests passed（零回归）
+- README `## Enable` 节提供可照抄的 `openclaw.config.json` 片段
+
+**不做的事（推后）**：
+- ❌ `docs/plugins/memory-milvus.md` 用户指南 → Task 16 或独立 docs 任务
+- ❌ `openclaw doctor` 扩展 milvus 连通性检查 → Task 16 以后
+- ❌ SDK backend 枚举正式扩展 `"milvus"` → Task 16（§13.4 Q3.2）

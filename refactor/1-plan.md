@@ -454,11 +454,35 @@ type MemoryFlushPlan = {
 - **遗留移交 Task 16**：`content_hash` schema 字段化 + SDK 去重能力抽取 + 存量数据迁移到 schema字段去重
 - 详见 decisions §12.3（`MEMORY_SOURCE_LABELS.IMPORT`） / §10.4（fallback） / §8.1 + §15（BM25 归 Task 16，与本任务无关）
 
-### Task 15: 接入 memory slot
+### Task 15: 接入 memory slot（切换验证 + onboarding）✅ 完成
 
-- 注册 `memory-milvus` 插件（kind: "memory"）
-- 实现 `MemoryPluginCapability` 全套
-- 配置 `plugins.slots.memory = "memory-milvus"` 切换
+> **状态**：✅ 完成于 2026-05-13
+
+- **前提（已在 Task 8/10/11/13 顺手落地，本任务不再重写）**：
+  - `kind:"memory"` 插件注册已完成（`openclaw.plugin.json` + `index.ts::definePluginEntry`）
+  - `MemoryPluginCapability` 三件套（promptBuilder / flushPlanResolver / runtime）全部实现
+  - `MemoryPluginRuntime`（`getMemorySearchManager` / `resolveMemoryBackendConfig` / `closeAllMemorySearchManagers`）全部实现
+  - `slots.ts::applyExclusiveSlotSelection` 互斥下发机制（方案 Y）已生效，两側 `register()` 无条件调 `registerTool`
+
+- **本任务工程动作**（Q1β：代码切换 + 集成测试 + onboarding）：
+
+  1. **host loader P1 清理**（decisions §13.4 Q3.4）：核查 `src/plugins/loader.ts` / `src/memory/memory-state.ts` / `src/memory/memory-runtime.ts` 中因 `applyExclusiveSlotSelection` 生效后变冗余的 memory 双插件防御判断（如重复的 slot 校验 / double-register 护栏），能删就删；保留项在提交说明里列举原因（如类型窄化 / 外部契约）
+  2. **切换集成测试**（Q2β，新建 `src/plugins/memory-slot-switch.test.ts` 或复用已有 loader 测试文件）：
+     - 场景 A：`slots.memory = "memory-core"` → 真实走 loader 管道 → 断言仅 memory-core 的 capability/tool 注册生效，memory-milvus entries 全被 disable
+     - 场景 B：`slots.memory = "memory-milvus"` → 对称断言
+     - 场景 C：`slots.memory = "none"` → 两侧均 disable，`registerMemoryCapability` 未被调用
+     - **不**含 live：Milvus 连通性 live 已在 Task 13 E2E 覆盖，本任务仅验证加载层切换
+  3. **onboarding 配置示例**（插件 README 级）：
+     - `extensions/memory-milvus/README.md` 新增 `## Enable` 小节：给出完整 `openclaw.config.json` 片段，包含 `plugins.slots.memory = "memory-milvus"` + `plugins.entries["memory-milvus"].config.milvus`（host/port/db/collection）+ `embedding.provider/model`（text-embedding-v3 / 1024 维）
+     - 给出切换回 `memory-core` 的逻辑：将 `slots.memory` 改回 `"memory-core"` 即可，**不侵犯存量数据**（Markdown 和 Milvus 分保各自存储，互切不会丢失）
+     - 标注需出现在的 onboarding 可观察线索（例 `pnpm openclaw` 启动日志中预期看到 `memory-milvus` 被加载的模板）
+  4. **不做的事**（推后）：
+     - `docs/plugins/memory-milvus.md` 用户指南→ 推 Task 16 或独立 docs 任务
+     - `openclaw doctor` 扩展 milvus 连通性检查 → 推 Task 16以后任务
+     - SDK backend 枚举正式扩展 `"milvus"` → 已归 Task 16（§13.4 Q3.2）
+
+- **验收标准**：新增的切换集成测试 3 个场景全绿 · `pnpm check:changed` 绿 · README 列出可照抄的配置片段
+- 详见 decisions §6 / §11 / §13.4 Q3.3-Q3.4 / Q3.5
 
 ### Task 16: 去重、更新、删除、版本、citation、agent 隔离
 
