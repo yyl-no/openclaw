@@ -588,14 +588,9 @@
 
 | 项目 | 说明 | 目标 |
 |------|------|------|
-| `memory_search` / `memory_get` 工具 | ✅ Task 11 全部完成（schema + manager + 工具层 + 注册 + 90 tests） | Task 11 ✅ |
-| `recordRecall` 正式实现 | ✅ Task 12 完成（query+upsert 两步落库，96 tests 全绿） | Task 12 ✅ |
-| Dreaming promotion（短→长） | Task 13，Alpha 退出条件 | memory-milvus |
-| live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
-| pi-tools 白名单架构下沉 | 当前硬编码，未来多后端时评估 | Task 16+ |
-| `session_key` 默认值 | write() 中 TODO：Host 注入默认 sessionKey | Task 16 |
-| BM25 全文本搜索 | Task 16 | memory-milvus |
-| sha256 去重 / update / delete / 版本 | Task 16 | memory-milvus |
+| `filterMemorySearchHitsBySessionVisibility` 接入 | milvus 结果当前无 session source | TBD |
+| 9-dim 高级召回信号 | dailyCount/groundedCount/totalScore 等 | TBD |
+| Citation 改为 runtime-api barrel 共享 | 当前内联复刻，未走共享 barrel | TBD |
 
 ---
 
@@ -660,16 +655,29 @@
 - ✅ R1（`OpenClawPluginApi.config` 可读）— 已解除
 - ✅ R4（memory-core/index.ts 注册点）— 已确认，不动
 - ✅ R6（slots.ts 互斥 disable）— 单层信赖，Step3 无条件注册
-- ⚠️ `filterMemorySearchHitsBySessionVisibility` 因 tsconfig rootDir 暂缺，milvus 结果无 session source 故 no-op，Task 16 接入
-- ⚠️ citation 装饰推 Task 16（当前 warnOnce 占位）
+- ⚠️ `filterMemorySearchHitsBySessionVisibility` 因 tsconfig rootDir 暂缺，milvus 结果无 session source 故 no-op，待接入
+- ⚠️ citation 装饰当前内联复刻，未走 memory-core runtime-api barrel 共享
 
-**遗留项（明确移交后续 Task）**：
-| 项目 | 移交 |
+**Task 16 已在前期完成的项**：
+| 项目 | 完成于 |
+|------|--------|
+| BM25 原生 hybridSearch + WeightedRanker | Task 13 |
+| 多 corpus 全量支持（sessions/wiki/all） | Task 11 |
+| citation 装饰 pipeline（cfg.memory.citations on/off/auto） | Task 11 |
+| SHA-256 dedup（content_hash 查重） | Task 13 |
+| update() query→merge→re-embed→upsert | Task 13 |
+| archive() 软删除 | Task 13 |
+| agent_id 全链路过滤 | Task 11 |
+| session_key 过滤 | Task 11 |
+| pi-tools writeToolNames 动态白名单 | Task 15 |
+| SDK backend "milvus" 枚举 | Task 10 |
+
+**遗留项**：
+| 项目 | 状态 |
 |------|------|
-| BM25 原生升级 | Task 16 |
-| 多 corpus 全量支持 | Task 16 |
-| citation 装饰 pipeline | Task 16 |
-| `filterMemorySearchHitsBySessionVisibility` 接入 | Task 16 |
+| `filterMemorySearchHitsBySessionVisibility` 接入 | 待做 |
+| 9-dim 高级召回信号 | 待做 |
+| Citation 改为 runtime-api barrel 共享 | 待做 |
 
 ### Task 11 Step 3: Plugin 注册集成 ✅ 完成
 
@@ -773,11 +781,16 @@
 - ✅ `README.md` 移除 Alpha 警告，更新能力表为全部 ✅
 - ✅ Live E2E 补齐 promotion 全链路
 
-**遗留技术债**（推 Task 16）**：
-- BM25 原生全文搜索（Milvus ≥ 2.4）
+**已完成（原计划 Task 16，实际随 Task 11/13 交付）**：
+- BM25 原生全文搜索（hybridSearch + WeightedRanker，当前 ANN+TF-IDF 降级兜底）
+- 去重（SHA-256 content_hash）、update()、archive() 软删除
+- 多 corpus 全量支持（sessions / wiki / all）
+- citation 装饰（cfg.memory.citations on/off/auto）
+
+**遗留项**：
 - 9 维高级召回信号（dailyCount / groundedCount / totalScore / maxScore / queryHashes 等）
-- 去重（sha256）、软删除、版本、citation 装饰
-- 多 corpus 全量支持（sessions / wiki）
+- `filterMemorySearchHitsBySessionVisibility` 接入
+- Citation 改为 runtime-api barrel 共享
 
 ---
 
@@ -819,8 +832,8 @@
 - `pnpm tsgo:extensions` → memory-milvus **0 错误**（11 预存 error 均在 memory-core）
 - `pnpm build` → 全绿
 
-**遗留移交 Task 16**：
-- `content_hash` schema 字段化 + SDK 去重能力抽取 + 存量数据迁移到 schema 字段去重
+**已完成**：content_hash schema 字段已加入 collection-bootstrap + insertEntry 查重路径（Task 13）。
+迁移工具的 SHA-256 去重独立运作，不依赖 schema 字段。
 
 ---
 
@@ -1005,18 +1018,20 @@ search()
 | 2 | update(id, patch) | ✅ | `search.ts` |
 | 3 | 软删除 archive(id) | ✅ | `search.ts` (memory_type="archived") |
 | 4 | agent_id 过滤 | ✅ | `search.ts` (search/get/recordRecall) |
-| 5 | citation 装饰 | ✅ | 通过 `runtime-api.ts` barrel 调 `decorateCitations` |
-| 6 | SDK backend 枚举 milvus | ✅ | `packages/memory-host-sdk` |
-| 7 | session 可见性 expr | ✅ | `search.ts` (buildScalarFilter) |
+| 5 | citation 装饰 | ✅ | `tools.search.ts`（内联复刻，非 runtime-api barrel） |
+| 6 | SDK backend 枚举 milvus | ✅ | `memory-state.ts` |
+| 7 | session 可见性 expr（backend侧） | ✅ | `search.ts` (buildScalarFilter session_key) |
 | 8 | BM25 原生升级 | ✅ | `search.ts` (searchBM25), `schema.ts`, README |
 | 9 | 多corpus全量 | ✅ | `tools.search.ts` (sessions/wiki/all) |
 | 10 | memory_write 对称 | ✅ | `pi-tools.ts`, `memory-state.ts`, 两插件 capability |
 
-### 1 项不做
+### 1 项不做 + 2 项留待后续
 
 | 项目 | 说明 |
 |------|------|
 | 9 维高级召回信号 | `dailyCount`/`groundedCount`/`totalScore`/`maxScore`/`queryHashes` 等 — 占位待定 |
+| `filterMemorySearchHitsBySessionVisibility`（应用层） | backend expr 已做，application-layer 双重过滤未接入 |
+| Citation 改 runtime-api barrel 共享 | 当前内联复刻，功能完整但不共享 |
 
 ### 验收总表
 

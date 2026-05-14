@@ -112,13 +112,15 @@ search()
 `memory_search` honors `cfg.memory.citations` ("on" | "off" | "auto") to
 append source citations (`\n\nSource: ...`) to search result snippets.
 Auto mode enables citations for direct chats, disables for group/channel
-contexts. Citation decoration is shared with memory-core via the runtime-api barrel.
+contexts. Implemented inline (replicates memory-core tools.citations.ts).
 
 ## Not yet available
 
 | Capability | Target |
 |---|---|
-| 9-dim advanced recall signals | TBD |
+| `filterMemorySearchHitsBySessionVisibility` integration | TBD |
+| 9-dim advanced recall signals (dailyCount/groundedCount/...) | TBD |
+| Citation via shared runtime-api barrel (currently inline) | TBD |
 
 ## Enable
 
