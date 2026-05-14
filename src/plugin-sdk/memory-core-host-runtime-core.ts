@@ -45,3 +45,14 @@ export {
 } from "../plugins/memory-state.js";
 export type { OpenClawPluginApi } from "../plugins/types.js";
 export { parseAgentSessionKey } from "../routing/session-key.js";
+// Citation decoration (shared between memory-core and memory-milvus)
+export {
+  clampResultsByInjectedChars,
+  decorateCitations,
+  formatCitation,
+  resolveMemoryCitationsMode,
+  shouldIncludeCitations,
+} from "../agents/memory-citations.js";
+
+// Session visibility filtering (shared between memory-core and memory-milvus)
+export { filterMemorySearchHitsBySessionVisibility } from "../agents/memory-session-visibility.js";

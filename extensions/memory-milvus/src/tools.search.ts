@@ -12,33 +12,17 @@
  */
 
 import {
+  decorateCitations,
+  filterMemorySearchHitsBySessionVisibility,
   jsonResult,
   listMemoryCorpusSupplements,
-  parseAgentSessionKey,
-  type MemoryCitationsMode,
+  resolveMemoryCitationsMode,
+  shouldIncludeCitations,
   type MemoryCorpusSearchResult,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
-
-// ── Citation 装饰（复刻 memory-core tools.citations.ts）──────────
-
-function resolveMemoryCitationsMode(cfg: OpenClawConfig): MemoryCitationsMode {
-  const mode = cfg.memory?.citations;
-  if (mode === "on" || mode === "off" || mode === "auto") return mode;
-  return "auto";
-}
-
-function shouldIncludeCitations(mode: MemoryCitationsMode, sessionKey?: string): boolean {
-  if (mode === "on") return true;
-  if (mode === "off") return false;
-  // auto mode: only decorate in direct chats
-  const parsed = parseAgentSessionKey(sessionKey);
-  if (!parsed?.rest) return true;
-  const tokens = new Set(parsed.rest.toLowerCase().split(":").filter(Boolean));
-  return !tokens.has("group") && !tokens.has("channel");
-}
 
 // ── Supplement 搜索辅助 ──────────────────────────────────────────
 
@@ -214,7 +198,7 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
       const manager = deps.getManager();
 
       // Search milvus (when needed) and supplements in parallel
-      const [milvusRaw, supplementResults] = await Promise.all([
+      let [milvusRaw, supplementResults] = await Promise.all([
         (async () => {
           if (!shouldQueryMilvus) return [] as MemoryReference[];
           if (!manager) {
@@ -238,6 +222,16 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
           });
         })(),
       ]);
+
+      // Session visibility filtering on milvus hits (before building results)
+      if (milvusRaw.length > 0 && deps.cfg) {
+        milvusRaw = await filterMemorySearchHitsBySessionVisibility({
+          cfg: deps.cfg,
+          requesterSessionKey: deps.agentSessionKey,
+          sandboxed: deps.sandboxed === true,
+          hits: milvusRaw,
+        });
+      }
 
       // Build results
       const isMultiCorpus = shouldQueryMilvus && shouldQuerySupplements;
@@ -266,19 +260,11 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
       if (corpus !== "wiki") {
         const cfg = deps.cfg;
         const citationMode = cfg ? resolveMemoryCitationsMode(cfg) : "auto";
-        const includeCitations = shouldIncludeCitations(citationMode, deps.agentSessionKey);
-        if (includeCitations) {
-          results = results.map((r) => {
-            const label = (r as any).provenance?.label ?? r.provenanceLabel ?? "";
-            if (!label) return r;
-            return {
-              ...r,
-              snippet: r.snippet != null
-                ? `${String(r.snippet).trim()}\n\nSource: ${label}`
-                : r.snippet,
-            };
-          });
-        }
+        const includeCitations = shouldIncludeCitations({
+          mode: citationMode,
+          sessionKey: deps.agentSessionKey,
+        });
+        results = decorateCitations(results, includeCitations);
       }
 
       // Record recall hook (milvus hits only)

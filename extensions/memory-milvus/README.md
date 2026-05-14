@@ -112,15 +112,19 @@ search()
 `memory_search` honors `cfg.memory.citations` ("on" | "off" | "auto") to
 append source citations (`\n\nSource: ...`) to search result snippets.
 Auto mode enables citations for direct chats, disables for group/channel
-contexts. Implemented inline (replicates memory-core tools.citations.ts).
+contexts. Shared via `openclaw/plugin-sdk/memory-core-host-runtime-core` barrel.
+
+## Session visibility
+
+`memory_search` applies `filterMemorySearchHitsBySessionVisibility` on milvus
+hits before building results, filtering `source:"sessions"` hits by the
+requester's visibility policy. Shared via the same runtime-api barrel.
 
 ## Not yet available
 
 | Capability | Target |
 |---|---|
-| `filterMemorySearchHitsBySessionVisibility` integration | TBD |
 | 9-dim advanced recall signals (dailyCount/groundedCount/...) | TBD |
-| Citation via shared runtime-api barrel (currently inline) | TBD |
 
 ## Enable
 
