@@ -230,6 +230,25 @@
 
 ---
 
+### 接口重构遗留编译错误修复 ✅ 完成
+
+**日期**：2026-05-14
+
+修复 `tsconfig.extensions.json` 下 memory-core 源文件全部 TS 编译错误（0 错误）。
+
+**涉及文件**：6 个
+
+| 文件 | 修复 |
+|------|------|
+| `dreaming-phases.ts` | `MemorySearchResult[]` → `MemoryReference[]`，`path/startLine/endLine` 编码进 `id` |
+| `manager.ts` | 移除未使用的 `MemorySearchManager` 导入 |
+| `search-manager.ts` | 移除未使用的 `toMemoryReference()` 函数 |
+| `short-term-promotion.ts` | `buildEntryKey` 改用 `{ id }`，删除 `store.entries` 中 `path/startLine/endLine` |
+| `tools.citations.ts` | 移除未使用导入 |
+| `tools.ts` | `memory_write` 改用 `MemoryDataBackend.write({ text, provenance })` |
+
+---
+
 ## 第二部分：memory-milvus 实现
 
 ### Task 7: 确认 Milvus 替代记忆本体 ✅ 完成

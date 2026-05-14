@@ -9,6 +9,7 @@ import {
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type {
+  MemoryDataBackend,
   MemoryReference,
   MemorySearchResult,
   MemorySearchRuntimeDebug,
@@ -546,8 +547,9 @@ export function createMemoryWriteTool(options: {
         }
 
         try {
-          const ref = await memory.manager.write({
+          const ref = await (memory.manager as unknown as MemoryDataBackend).write({
             text,
+            provenance: { kind: "file", label },
           });
           return jsonResult({
             id: ref.id,

@@ -17,7 +17,6 @@ import {
   type MemoryEntry,
   type MemoryProviderStatus,
   type MemoryReference,
-  type MemorySearchManager,
   type MemorySearchRuntimeDebug,
   type MemorySearchResult,
   type MemorySource,

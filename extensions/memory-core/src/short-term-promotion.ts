@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { MemoryEntry, MemoryReference, MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
+import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import { formatMemoryDreamingDay } from "openclaw/plugin-sdk/memory-core-host-status";
 import { appendMemoryHostEvent } from "openclaw/plugin-sdk/memory-host-events";
 import { privateFileStore } from "openclaw/plugin-sdk/security-runtime";
@@ -964,7 +964,6 @@ export async function recordShortTermRecalls(params: {
       if (!snippet || isContaminatedDreamingSnippet(snippet)) {
         continue;
       }
-      const claimHash = snippet ? buildClaimHash(snippet) : undefined;
       const baseKey = buildEntryKey({ id: result.id });
       const key = baseKey;
       const existing = store.entries[key];
@@ -1093,13 +1092,8 @@ export async function recordGroundedShortTermCandidates(params: {
       }
       const queryHash = hashQuery(effectiveQuery);
       const claimHash = buildClaimHash(item.snippet);
-      const key = buildEntryKey({
-        path: item.path,
-        startLine: item.startLine,
-        endLine: item.endLine,
-        source: "memory",
-        claimHash,
-      });
+      const id = `file:${item.path}:${item.startLine}:${item.endLine}`;
+      const key = buildEntryKey({ id, source: "memory" });
       const existing = store.entries[key];
       const recallDaysBase = existing?.recallDays ?? [];
       const queryHashesBase = existing?.queryHashes ?? [];
@@ -1122,9 +1116,6 @@ export async function recordGroundedShortTermCandidates(params: {
 
       store.entries[key] = {
         key,
-        path: item.path,
-        startLine: item.startLine,
-        endLine: item.endLine,
         source: "memory",
         snippet: item.snippet,
         recallCount: Math.max(0, Math.floor(existing?.recallCount ?? 0)),

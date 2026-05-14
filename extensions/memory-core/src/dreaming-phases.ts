@@ -10,7 +10,7 @@ import {
   parseUsageCountedSessionIdFromFileName,
   sessionPathForFile,
 } from "openclaw/plugin-sdk/memory-core-host-engine-qmd";
-import type { MemoryReference, MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
+import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import {
   formatMemoryDreamingDay,
   resolveMemoryDreamingWorkspaces,
@@ -382,7 +382,7 @@ export function filterRecallEntriesWithinLookback(params: {
 
 type DailyIngestionBatch = {
   day: string;
-  results: MemorySearchResult[];
+  results: MemoryReference[];
 };
 
 type DailyIngestionFileState = {
@@ -674,7 +674,7 @@ async function appendSessionCorpusLines(params: {
   workspaceDir: string;
   day: string;
   lines: SessionIngestionMessage[];
-}): Promise<MemorySearchResult[]> {
+}): Promise<MemoryReference[]> {
   if (params.lines.length === 0) {
     return [];
   }
@@ -710,9 +710,6 @@ async function appendSessionCorpusLines(params: {
     const lineNumber = existingLineCount + index + 1;
     return {
       id: `file:${relativePath}:${lineNumber}:${lineNumber}`,
-      path: relativePath,
-      startLine: lineNumber,
-      endLine: lineNumber,
       score: SESSION_INGESTION_SCORE,
       snippet: entry.snippet,
       source: "memory" as const,
@@ -1046,7 +1043,7 @@ async function ingestSessionTranscriptSignals(params: {
     await recordShortTermRecalls({
       workspaceDir: params.workspaceDir,
       query: `__dreaming_sessions__:${batch.day}`,
-      results: batch.results as unknown as MemoryReference[],
+      results: batch.results,
       signalType: "daily",
       dedupeByQueryPerDay: true,
       dayBucket: ingestionDayBucket,
@@ -1146,13 +1143,10 @@ async function collectDailyIngestionBatches(params: {
     }
     const lines = stripManagedDailyDreamingLines(raw.split(/\r?\n/));
     const chunks = buildDailySnippetChunks(lines, perFileCap);
-    const results: MemorySearchResult[] = [];
+    const results: MemoryReference[] = [];
     for (const chunk of chunks) {
       results.push({
         id: `file:${relativePath}:${chunk.startLine}:${chunk.endLine}`,
-        path: relativePath,
-        startLine: chunk.startLine,
-        endLine: chunk.endLine,
         score: DAILY_INGESTION_SCORE,
         snippet: chunk.snippet,
         source: "memory" as const,
@@ -1218,7 +1212,7 @@ async function ingestDailyMemorySignals(params: {
     await recordShortTermRecalls({
       workspaceDir: params.workspaceDir,
       query: `__dreaming_daily__:${batch.day}`,
-      results: batch.results as unknown as MemoryReference[],
+      results: batch.results,
       signalType: "daily",
       dedupeByQueryPerDay: true,
       dayBucket: ingestionDayBucket,
@@ -1300,14 +1294,11 @@ export async function seedHistoricalDailyMemorySignals(params: {
     }
     const lines = stripManagedDailyDreamingLines(raw.split(/\r?\n/));
     const chunks = buildDailySnippetChunks(lines, perFileCap);
-    const results: MemorySearchResult[] = [];
+    const results: MemoryReference[] = [];
     for (const chunk of chunks) {
       const remRelativePath = `memory/${entry.day}.md`;
       results.push({
         id: `file:${remRelativePath}:${chunk.startLine}:${chunk.endLine}`,
-        path: remRelativePath,
-        startLine: chunk.startLine,
-        endLine: chunk.endLine,
         score: DAILY_INGESTION_SCORE,
         snippet: chunk.snippet,
         source: "memory" as const,
