@@ -4,7 +4,7 @@ import path from "node:path";
 import { normalizeLowercaseStringOrEmpty, normalizeOptionalString } from "./string-utils.js";
 
 export type ChatType = "direct" | "group" | "channel";
-export type MemoryBackend = "builtin" | "qmd";
+export type MemoryBackend = "builtin" | "qmd" | "milvus";
 export type MemoryCitationsMode = "auto" | "on" | "off";
 export type MemoryQmdSearchMode = "query" | "search" | "vsearch";
 export type MemoryQmdStartupMode = "off" | "idle" | "immediate";

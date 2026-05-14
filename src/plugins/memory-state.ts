@@ -93,6 +93,9 @@ export type MemoryRuntimeBackendConfig =
   | {
       backend: "qmd";
       qmd?: MemoryRuntimeQmdConfig;
+    }
+  | {
+      backend: "milvus";
     };
 
 export type MemoryPluginRuntime = {

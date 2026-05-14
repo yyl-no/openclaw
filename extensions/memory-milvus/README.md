@@ -14,8 +14,10 @@ Milvus-backed memory plugin providing vector ANN search for OpenClaw memory.
 | `recordRecall` (recall-count tracking + upsert) | ✅ |
 | Dreaming promotion `rankPromotionCandidates` + `applyPromotions` | ✅ |
 | Source label / memory type validation | ✅ |
+| Dedup (SHA-256 content hash) + update + soft-delete (archive) | ✅ |
 | AI flush turn prompt integration | ✅ |
 | `memory migrate` CLI (Markdown ↔ Milvus bidirectional) | ✅ |
+| BM25 native hybrid search (Milvus ≥ 2.4, opt-in) | ✅ |
 
 ## Migration
 
@@ -39,12 +41,76 @@ openclaw memory migrate ./my-memory-dir --reverse --type=short_term
 Milvus `provenance_label` query. Reverse output goes to `memory-export/<timestamp>/`
 (human-friendly) and never overwrites the original `memory/*.md`.
 
+## BM25 Native Full-Text Search (Milvus ≥ 2.4)
+
+When a BM25 Function is created on the Milvus server, the plugin can use
+native hybrid search (`hybridSearch + WeightedRanker`) instead of the
+client-side TF-IDF fallback.
+
+### Server-side setup
+
+Create the BM25 Function on your Milvus instance (requires Milvus ≥ 2.4).
+This cannot be done via the Node.js SDK — use the RESTful API or pymilvus.
+
+**Via RESTful API** (replace `<host>`, `<port>`, `<collection>`):
+
+```bash
+curl -X POST "http://<host>:<port>/v2/vectordb/functions/create" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collectionName": "<collection>",
+    "functionName": "bm25_fn",
+    "functionType": "BM25",
+    "inputFieldNames": ["text"],
+    "outputFieldNames": ["sparse_bm25"]
+  }'
+```
+
+**Via pymilvus**:
+
+```python
+from pymilvus import Collection, Function, FunctionType
+
+col = Collection("<collection>")
+bm25_fn = Function(
+    name="bm25_fn",
+    function_type=FunctionType.BM25,
+    input_field_names=["text"],
+    output_field_names=["sparse_bm25"],
+)
+col.create_function(bm25_fn)
+```
+
+After creating the Function, enable BM25 in the plugin config:
+
+```json
+{
+  "config": {
+    "milvus": { "host": "localhost", "port": 19530 },
+    "search": { "useBM25": true, "vectorWeight": 0.7, "textWeight": 0.3 }
+  }
+}
+```
+
+The plugin will then use a single `hybridSearch` call with both the
+dense embedding and sparse BM25 fields, combined via `WeightedRanker`.
+If the BM25 Function is not available, it falls back to separate
+ANN + client-side TF-IDF automatically.
+
+### Fallback chain
+
+```
+search()
+  ├─ useBM25=true? → searchBM25() via hybridSearch
+  │   ├─ success → apply decay + MMR → done
+  │   └─ null (Function missing / error) → legacy path
+  └─ legacy: searchVector() + searchKeyword() → mergeResults → MMR
+```
+
 ## Not yet available
 
 | Capability | Target |
 |---|---|
-| BM25 native full-text search (Milvus ≥ 2.4) | Task 16 |
-| Dedup / update / delete / versioning | Task 16 |
 | Citation decoration pipeline | Task 16 |
 | Multi-corpus support (sessions / wiki) | Task 16 |
 | 9-dim advanced recall signals | Task 16 |

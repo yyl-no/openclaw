@@ -354,7 +354,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     expect(querySpy).toHaveBeenCalledWith(
       expect.objectContaining({
         collection_name: "test_collection",
-        filter: "id in [1,2]",
+        filter: `id in [1,2] && agent_id == "agent-1"`,
         limit: 2,
       }),
     );
@@ -566,7 +566,7 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 
     expect(results).toHaveLength(1);
     expect(querySpy).toHaveBeenCalledOnce();
-    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && created_at >= "2026-05-13T00:00:00.000Z"');
+    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type != "archived" && created_at >= "2026-05-13T00:00:00.000Z"');
   });
 
   it("empty query + memoryType + createdAfter → combined filter", async () => {
@@ -592,7 +592,8 @@ describe("MilvusSearchManager.search: scalar filters", () => {
     // scalarFilter = 'agent_id == "agent-1"' → non-empty → queryByFilter
     expect(results).toHaveLength(2);
     expect(querySpy).toHaveBeenCalledOnce();
-    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1"');
+    // scalarFilter includes agent_id + default excludeArchived
+    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type != "archived"');
   });
 
   it("non-empty query + memoryType → hybrid search with combined filter", async () => {

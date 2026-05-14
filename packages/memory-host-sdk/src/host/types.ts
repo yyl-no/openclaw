@@ -43,7 +43,7 @@ export type MemorySyncProgressUpdate = {
 };
 
 export type MemorySearchRuntimeDebug = {
-  backend: "builtin" | "qmd";
+  backend: "builtin" | "qmd" | "milvus";
   configuredMode?: string;
   effectiveMode?: string;
   fallback?: string;
@@ -77,7 +77,7 @@ export type MemoryEntry = {
 };
 
 export type MemoryProviderStatus = {
-  backend: "builtin" | "qmd";
+  backend: "builtin" | "qmd" | "milvus";
   provider: string;
   model?: string;
   requestedProvider?: string;

@@ -30,3 +30,12 @@ export type {
   RepairShortTermPromotionArtifactsResult,
   ShortTermAuditSummary,
 } from "./src/short-term-promotion.js";
+
+export {
+  decorateCitations,
+  formatCitation,
+  clampResultsByInjectedChars,
+  resolveMemoryCitationsMode,
+  shouldIncludeCitations,
+} from "./src/tools.citations.js";
+export { filterMemorySearchHitsBySessionVisibility } from "./src/session-search-visibility.js";

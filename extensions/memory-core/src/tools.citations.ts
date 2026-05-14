@@ -30,7 +30,7 @@ export function decorateCitations<T extends CitationInput>(
   });
 }
 
-function formatCitation(entry: CitationInput): string {
+export function formatCitation(entry: CitationInput): string {
   if (entry.provenance?.label) {
     return entry.provenance.label;
   }

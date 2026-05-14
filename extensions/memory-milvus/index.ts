@@ -217,7 +217,7 @@ const milvusRuntime: MemoryPluginRuntime = {
   },
 
   resolveMemoryBackendConfig(_params) {
-    return { backend: "qmd" };
+    return { backend: "milvus" };
   },
 
   async closeAllMemorySearchManagers() {

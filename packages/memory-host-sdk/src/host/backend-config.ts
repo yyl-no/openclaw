@@ -367,6 +367,9 @@ export function resolveMemoryBackendConfig(params: {
   const normalizedAgentId = normalizeAgentId(params.agentId);
   const backend = params.cfg.memory?.backend ?? DEFAULT_BACKEND;
   const citations = params.cfg.memory?.citations ?? DEFAULT_CITATIONS;
+  if (backend === "milvus") {
+    return { backend: "milvus", citations };
+  }
   if (backend !== "qmd") {
     return { backend: "builtin", citations };
   }

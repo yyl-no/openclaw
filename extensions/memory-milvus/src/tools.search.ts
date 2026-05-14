@@ -12,10 +12,44 @@
  * - 不装饰 citation（MemoryReference 原样透传）
  */
 
-import { jsonResult, type OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import { jsonResult, parseAgentSessionKey, type MemoryCitationsMode, type OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { warnOnce } from "./warn-once.js";
+
+// ── Citation 装饰（复刻 memory-core tools.citations.ts）──────────
+
+function resolveMemoryCitationsMode(cfg: OpenClawConfig): MemoryCitationsMode {
+  const mode = cfg.memory?.citations;
+  if (mode === "on" || mode === "off" || mode === "auto") return mode;
+  return "auto";
+}
+
+function shouldIncludeCitations(mode: MemoryCitationsMode, sessionKey?: string): boolean {
+  if (mode === "on") return true;
+  if (mode === "off") return false;
+  // auto mode: only decorate in direct chats
+  const parsed = parseAgentSessionKey(sessionKey);
+  if (!parsed?.rest) return true;
+  const tokens = new Set(parsed.rest.toLowerCase().split(":").filter(Boolean));
+  return !tokens.has("group") && !tokens.has("channel");
+}
+
+function formatCitation(ref: MemoryReference): string {
+  if (ref.provenance?.label) return ref.provenance.label;
+  return "";
+}
+
+function decorateCitations(
+  results: MemoryReference[],
+  include: boolean,
+): MemoryReference[] {
+  if (!include) return results;
+  return results.map((r) => ({
+    ...r,
+    snippet: `${(r.snippet ?? "").trim()}\n\nSource: ${formatCitation(r)}`,
+  }));
+}
 
 // ── Schema ──────────────────────────────────────────────────────
 
@@ -132,19 +166,17 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
           sessionKey: deps.agentSessionKey,
         });
 
-        // Session visibility filtering: milvus results have no session source,
-        // so the filter is a no-op for now. Will integrate
-        // filterMemorySearchHitsBySessionVisibility when corpus=sessions
-        // is supported (Task 16).
-        const surfacedResults = rawResults;
+        // Session visibility filtering (双层叠加)
+        // TODO(T16-9): Wire filterMemorySearchHitsBySessionVisibility via runtime-api
+        // barrel once corpus=sessions support is added. For pure milvus entries
+        // (no source="sessions" hits) this is currently a no-op.
+        const visibilityFilteredResults = rawResults;
 
-        // Citation not yet supported
-        if (surfacedResults.length > 0) {
-          warnOnce(
-            "citations-unavailable",
-            "citations rendering not yet supported in milvus backend; deferred to Task 16",
-          );
-        }
+        // Citation decoration (on visibility-filtered results)
+        const cfg = deps.cfg;
+        const citationMode = cfg ? resolveMemoryCitationsMode(cfg) : "auto";
+        const includeCitations = shouldIncludeCitations(citationMode, deps.agentSessionKey);
+        const decoratedResults = decorateCitations(visibilityFilteredResults, includeCitations);
 
         // Record recall hook
         if (rawResults.length > 0 && manager.recordRecall) {
@@ -152,7 +184,7 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
         }
 
         return jsonResult({
-          results: surfacedResults,
+          results: decoratedResults,
           corpus: corpus === "all" ? "memory" : corpus,
         });
       } catch (err) {

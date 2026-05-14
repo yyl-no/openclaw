@@ -484,24 +484,35 @@ type MemoryFlushPlan = {
 - **验收标准**：新增的切换集成测试 3 个场景全绿 · `pnpm check:changed` 绿 · README 列出可照抄的配置片段
 - 详见 decisions §6 / §11 / §13.4 Q3.3-Q3.4 / Q3.5
 
-### Task 16: 去重、更新、删除、版本、citation、agent 隔离
+### Task 16: 插件收尾——除向量库本身限制外全面对齐官方
 
-- 去重：sha256 查重
-- 更新：update + 重 embed
-- 删除：软删除 `memory_type="archived"`
-- 版本：metadata 记录修改历史
-- citation：MemoryReference 含 citation
-- agent 隔离：`agent_id` 字段 + 查询过滤
-- **SDK backend 枚举正式扩展**：`"builtin" \| "qmd"` → `"builtin" \| "qmd" \| "milvus"`（撤下 memory-milvus 中 `resolveMemoryBackendConfig` 伪装 qmd 的 stub）
-- **`memory_write` 对称规划**：文件后端也走 `memory_write`，复用 Task 11 的 slot 条件 register 机制
-- **backend 侧会话可见性 expr 原生过滤**（Milvus collection expr `session_key == "..."`），与应用层 `filterMemorySearchHitsBySessionVisibility` 双层叠加
-- **BM25 原生升级**（详见 decisions §8.1 + §15）：当 Milvus ≥ 2.4 服务端已创建 BM25 Function 后，`searchKeyword()` 切 `hybridSearch + WeightedRanker`，删除客户端 TF-IDF；schema 加 `FIELD_SPARSE_BM25` + 索引；含融合权重 w1/w2 参数化与 `extractKeywords` 算法治理
-- **多 corpus 全量支持**（详见 decisions §17）：`corpus=sessions` → milvus 存 session 转录方案 + memory_type 过滤；`corpus=wiki` / `all` → 接入 `searchMemoryCorpusSupplements` / `getMemoryCorpusSupplementResult` 机制，与 milvus 命中多路融合排序
-- **citation 装饰完整接入**（详见 decisions §18）：Task 16 评估 SDK 共享抽取三选：X（提到 `packages/memory-host-sdk`）/ Y（memory-core runtime-api 导出）/ Z（milvus 复刻，不推荐）；接入 `cfg.memory.citations: "on"|"off"|"auto"`，覆盖 direct/group auto 模式
-- **高级召回维度（对标 OpenClaw 官方 11 维打分）**：
-  - 字段：`dailyCount` / `groundedCount` / `totalScore` / `maxScore` / `firstRecalledAt` / `queryHashes` / `recallDays` / `conceptTags` / `claimHash`
-  - 状态：**待定**，评估是否采纳官方多维加权打分模型升级 Task 13 Deep Dreaming
-  - 触发：`recordRecall` 扩展 + Collection schema 扩字段
+- **总原则**：除 Milvus 向量库本身不可克服的限制（如原子 update / Function-as-code BM25）外，插件能力与 memory-core 官方全面对齐
+
+- **要做的 10 项**：
+  1. **去重**：`schema.ts` 增 `FIELD_CONTENT_HASH`（VarChar(64)），write 路径计算 `sha256(text + "\0" + provenance_label)`。存量数据靠 `provenance_label` 兜底不强一致回填；Task 14 迁移工具的内存 sha256 收敛为调 schema 字段查重
+  2. **update**：`MilvusSearchManager.update(id, patch)` — `query → 合并 patch → 必要时重 embed（text 变）→ upsert`；复用 §12.7 失败语义
+  3. **软删除**：`MilvusSearchManager.archive(id)` 设 `memory_type="archived"`；search 默认 `memory_type in [short_term, long_term]`，`includeArchived` 开关可查
+  4. **agent_id 查询过滤**：search / get / recordRecall 全链路追加 `agent_id == "<callerAgentId>"` expr；跨 agent 外露必须显式 `crossAgent: true`
+  5. **citation 装饰**（Q1β）：memory-core 从 `extensions/memory-core/src/runtime-api.ts` 公共 barrel 导出 `decorateCitations` / `formatCitation` / `clampResultsByInjectedChars`；memory-milvus 通过 runtime-api 调用（AGENTS 允许路径）。接入 `cfg.memory.citations: "on"|"off"|"auto"`，覆盖 direct/group auto 模式；撤下 Task 11 的 warnOnce 占位
+  6. **SDK backend 枚举正式扩展**：`packages/memory-host-sdk` 中 `"builtin" \| "qmd"` → `"builtin" \| "qmd" \| "milvus"`；撤下 memory-milvus 中 `resolveMemoryBackendConfig` 伪装 qmd 的 stub（§13.4 Q3.2）
+  7. **backend 侧 session 可见性 expr 原生过滤**：Milvus collection expr `session_key == "..."`，与应用层 `filterMemorySearchHitsBySessionVisibility` 双层叠加（§13.4 Q3.8）
+  8. **BM25 原生升级**（§8.1 + §15）：Milvus 服务端预创建 BM25 Function 后，`searchKeyword()` 切 `hybridSearch + WeightedRanker`，删客户端 TF-IDF；schema 加 `FIELD_SPARSE_BM25` + 索引；w1/w2 作为插件 config 参数化（默认 0.7/0.3）；`extractKeywords` 算法源码注释说明其偏上限；README 补服务端 Function 创建运维步骤；客户端 TF-IDF 降级链路保留，服务端 Function 不存在时自动走旧路
+  9. **多 corpus 全量支持**（§17）：`corpus=sessions` → milvus 存 session 转录 + `memory_type` 过滤；`corpus=wiki` / `all` → 接入 `searchMemoryCorpusSupplements` / `getMemoryCorpusSupplementResult`，与 milvus 命中多路融合排序；撤下 Task 11 中 `sessions/wiki/all` 返回空 + warnOnce 的占位逻辑
+  10. **`memory_write` 对称规划**（Q2β 折中，§13.4 Q3.6）：
+      - `extensions/memory-core/index.ts` 也注册 `memory_write` 工具，底层调用原 `manager.write()` 逻辑，AI 看到的工具表面两边一致
+      - **保留** pi-tools 自动 flush 兜底路径（双路径并存，切换安全）
+      - pi-tools 白名单下沉：memory 相关工具名从硬编码改为从激活 memory 插件 manifest 读取（`MemoryPluginCapability` 新增 `writeToolNames: string[]` 声明）
+      - sessionKey 默认值处理：Host 在 wrap `memory_write` 调用时 session-aware 透传；collection insert 默认值以 `""` 补（TODO 收敛）
+
+- **不做的事**（1 项，纯占位待定）：
+  - ❌ **9 维高级召回信号**：`dailyCount` / `groundedCount` / `totalScore` / `maxScore` / `firstRecalledAt` / `queryHashes` / `recallDays` / `conceptTags` / `claimHash` — §13.2 / §13.4 标“占位待定，评估是否采纳官方多维加权打分模型”，不影响能力对齐
+
+- **验收标准**：
+  - 上述 10 项全部有 mock 单测覆盖；`update` / `archive` / `agent_id` / `citation` / `memory_write 对称` 有集成测试
+  - `pnpm test extensions/memory-milvus` + `pnpm test extensions/memory-core` 双侧零回归
+  - `OPENCLAW_LIVE_TEST=1` 下跑一轮完整 forward / search / update / archive / citation 输出验证
+  - README 补：BM25 服务端 Function 创建运维步骤 + `cfg.memory.citations` 开关说明
+- 详见 decisions §8.1 / §11 / §13.2 / §13.4 / §15 / §17 / §18
 
 ---
 

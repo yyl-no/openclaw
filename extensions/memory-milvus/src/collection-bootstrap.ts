@@ -11,6 +11,7 @@ import { MilvusClient, type ResStatus, type DescribeCollectionResponse } from "@
 import type { FieldType } from "@zilliz/milvus2-sdk-node/dist/milvus/types/Collection.js";
 import {
   FIELD_AGENT_ID,
+  FIELD_CONTENT_HASH,
   FIELD_CREATED_AT,
   FIELD_EMBEDDING,
   FIELD_ID,
@@ -21,9 +22,12 @@ import {
   FIELD_RECALL_COUNT,
   FIELD_SESSION_KEY,
   FIELD_SNIPPET,
+  FIELD_SPARSE_BM25,
   FIELD_TEXT,
   FIELD_UPDATED_AT,
   AGENT_ID_MAX_LENGTH,
+  BM25_FIELD_DESCRIPTION,
+  CONTENT_HASH_MAX_LENGTH,
   MEMORY_TYPE_MAX_LENGTH,
   PROVENANCE_KIND_MAX_LENGTH,
   PROVENANCE_LABEL_MAX_LENGTH,
@@ -144,6 +148,17 @@ function buildCollectionFields(embeddingDim: number): FieldType[] {
       description: "ISO 8601 last recall timestamp (β)",
     },
     {
+      name: FIELD_CONTENT_HASH,
+      data_type: "VarChar",
+      type_params: { max_length: String(CONTENT_HASH_MAX_LENGTH) },
+      description: "SHA-256 content hash for dedup (text + provenance_label)",
+    },
+    {
+      name: FIELD_SPARSE_BM25,
+      data_type: "SparseFloatVector",
+      description: BM25_FIELD_DESCRIPTION,
+    },
+    {
       name: FIELD_METADATA,
       data_type: "JSON",
       description: "Extensible metadata for future fields",
@@ -169,17 +184,18 @@ async function tryDescribe(
 }
 
 /**
- * 探测 index 是否已在 embedding 字段上存在。
+ * 探测 index 是否已在指定字段上存在。
  * 返回已存在的 index 名称，不存在则返回 null。
  */
 async function tryDescribeIndex(
   client: MilvusClient,
   collectionName: string,
+  fieldName: string = FIELD_EMBEDDING,
 ): Promise<string | null> {
   try {
     const res = await client.describeIndex({
       collection_name: collectionName,
-      field_name: FIELD_EMBEDDING,
+      field_name: fieldName,
     });
     if (res.index_descriptions?.length > 0) {
       return res.index_descriptions[0]!.index_name;
@@ -248,7 +264,25 @@ export async function ensureCollectionReady(
     }
   }
 
-  // Step 3: Load — 确保 loaded
+  // Step 3: Sparse index (BM25) — 幂等创建
+  const existingSparseIndex = await tryDescribeIndex(client, collectionName, FIELD_SPARSE_BM25);
+  if (!existingSparseIndex) {
+    const sparseIndexRes: ResStatus = await client.createIndex({
+      collection_name: collectionName,
+      field_name: FIELD_SPARSE_BM25,
+      index_name: `${collectionName}_sparse_bm25_idx`,
+      index_type: "SPARSE_INVERTED_INDEX",
+      metric_type: metric,
+      params: {},
+    });
+    if (sparseIndexRes.error_code !== "Success" && sparseIndexRes.error_code !== "0") {
+      throw new Error(
+        `Failed to create sparse index on "${FIELD_SPARSE_BM25}": ${sparseIndexRes.reason ?? sparseIndexRes.error_code}`,
+      );
+    }
+  }
+
+  // Step 4: Load — 确保 loaded
   const loadState = await client.getLoadState({ collection_name: collectionName });
   if (loadState.state !== "LoadStateLoaded") {
     await client.loadCollection({

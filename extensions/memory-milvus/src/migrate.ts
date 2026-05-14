@@ -7,7 +7,6 @@
  * 注册到 memory-milvus 插件的 CLI 钩子，与 memory_write 同插件。
  */
 
-import { createHash } from "node:crypto";
 import { readFile, readdir, mkdir, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
@@ -15,6 +14,7 @@ import type { MilvusClient, QueryReq } from "@zilliz/milvus2-sdk-node";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 import {
+  FIELD_CONTENT_HASH,
   FIELD_ID,
   FIELD_TEXT,
   FIELD_SNIPPET,
@@ -27,6 +27,7 @@ import {
   FIELD_RECALL_COUNT,
   FIELD_UPDATED_AT,
   FIELD_LAST_RECALLED_AT,
+  computeContentHash,
 } from "./schema.js";
 import {
   MilvusSearchManager,
@@ -195,18 +196,8 @@ function chunkMarkdown(lines: string[]): FileChunk[] {
 
 // ── 去重 ──────────────────────────────────────────────────────────
 
-/** SHA256 哈希（hex 编码） */
-function sha256(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
-}
-
-/**
- * 内存级去重键（同 batch 内）。
- * 基于 text + provenance_label 计算 sha256。
- */
-function dedupKey(text: string, provenanceLabel: string): string {
-  return sha256(`${text}\0${provenanceLabel}`);
-}
+/** 去重键：基于 text + provenance_label 计算 content_hash（与 schema.ts 一致） */
+const dedupKey = computeContentHash;
 
 // ── 正向迁移：Markdown → Milvus ──────────────────────────────────
 
@@ -267,12 +258,12 @@ export async function migrateMarkdownToMilvus(
       }
       seenHashes.add(dKey);
 
-      // Cross-batch dedup: check if provenance_label already exists in Milvus
+      // Cross-batch dedup: check content_hash in Milvus (converged from provenance_label)
       if (!opts.dryRun) {
         try {
           const existing = await client.query({
             collection_name: collectionName,
-            filter: `${FIELD_PROVENANCE_LABEL} == "${provenanceLabel.replace(/"/g, '\\"')}"`,
+            filter: `${FIELD_CONTENT_HASH} == "${dKey.replace(/"/g, '\\"')}"`,
             output_fields: [FIELD_ID],
             limit: 1,
           } as QueryReq);
@@ -282,11 +273,22 @@ export async function migrateMarkdownToMilvus(
             continue;
           }
         } catch (err) {
-          // Cross-batch dedup query failure is non-fatal — proceed with insert
-          console.warn(
-            `[memory-milvus] Cross-batch dedup query failed for ${provenanceLabel}:`,
-            (err as Error).message,
-          );
+          // content_hash not yet on schema (alpha collection) → fallback to provenance_label
+          try {
+            const existing = await client.query({
+              collection_name: collectionName,
+              filter: `${FIELD_PROVENANCE_LABEL} == "${provenanceLabel.replace(/"/g, '\\"')}"`,
+              output_fields: [FIELD_ID],
+              limit: 1,
+            } as QueryReq);
+            if (existing.data && existing.data.length > 0) {
+              result.skipped++;
+              console.log(`[${ci + 1}/${chunks.length}] file=${relPath} action=skip:dup-cross-batch(label-fallback)`);
+              continue;
+            }
+          } catch {
+            // Both failed — proceed with insert
+          }
         }
       }
 

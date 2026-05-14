@@ -97,7 +97,7 @@ describe("memory_search tool: corpus 路由", () => {
       minScore: 0.3,
       sessionKey: undefined,
     });
-    expect(payload.results).toEqual([makeRef({ id: "1", snippet: "Memory hit" })]);
+    expect(payload.results).toEqual([makeRef({ id: "1", snippet: "Memory hit\n\nSource: chat_extract" })]);
     expect(payload.corpus).toBe("memory");
   });
 
@@ -231,14 +231,31 @@ describe("memory_search tool: recordRecall hook", () => {
   });
 });
 
-// ── Citation 不装饰 ──────────────────────────────────────────────
+// ── Citation 装饰 ────────────────────────────────────────────────
 
-describe("memory_search tool: citation 无装饰", () => {
-  it("MemoryReference 不含 citation 后缀 (\\n\\nSource:)", async () => {
+describe("memory_search tool: citation 装饰", () => {
+  it("默认 (cfg 未设置, 无 sessionKey) → auto 模式 → direct → 包含 citation", async () => {
+    const ref = makeRef({ id: "1", snippet: "Some memory content", provenance: { kind: "milvus", label: "test_source.md" } });
+    const tool = createMemorySearchTool(
+      makeDeps({
+        getManager: () => ({ search: vi.fn().mockResolvedValue([ref]) }),
+      }),
+    );
+
+    const result = await tool.execute("call-1", { query: "test" }, undefined);
+    const payload = parseResult(result);
+    const results = payload.results as MemoryReference[];
+
+    expect(results).toHaveLength(1);
+    expect(results[0].snippet).toContain("\n\nSource: test_source.md");
+  });
+
+  it("cfg.memory.citations='off' → 不装饰 citation", async () => {
     const ref = makeRef({ id: "1", snippet: "Some memory content" });
     const tool = createMemorySearchTool(
       makeDeps({
         getManager: () => ({ search: vi.fn().mockResolvedValue([ref]) }),
+        cfg: { memory: { citations: "off" } } as any,
       }),
     );
 
@@ -251,15 +268,21 @@ describe("memory_search tool: citation 无装饰", () => {
     expect(results[0].snippet).toBe("Some memory content");
   });
 
-  it("命中时 warnOnce 提示 citation 暂不支持", async () => {
-    const tool = createMemorySearchTool(makeDeps());
-
-    await tool.execute("call-1", { query: "test" }, undefined);
-
-    expect(warnOnceMock).toHaveBeenCalledWith(
-      "citations-unavailable",
-      "citations rendering not yet supported in milvus backend; deferred to Task 16",
+  it("cfg.memory.citations='on' → 强制装饰", async () => {
+    const ref = makeRef({ id: "1", snippet: "Forced citation", provenance: { kind: "milvus", label: "force_label" } });
+    const tool = createMemorySearchTool(
+      makeDeps({
+        getManager: () => ({ search: vi.fn().mockResolvedValue([ref]) }),
+        cfg: { memory: { citations: "on" } } as any,
+      }),
     );
+
+    const result = await tool.execute("call-1", { query: "test" }, undefined);
+    const payload = parseResult(result);
+    const results = payload.results as MemoryReference[];
+
+    expect(results).toHaveLength(1);
+    expect(results[0].snippet).toContain("\n\nSource: force_label");
   });
 });
 

@@ -22,6 +22,7 @@ import type {
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   FIELD_AGENT_ID,
+  FIELD_CONTENT_HASH,
   FIELD_CREATED_AT,
   FIELD_EMBEDDING,
   FIELD_ID,
@@ -32,9 +33,11 @@ import {
   FIELD_RECALL_COUNT,
   FIELD_SESSION_KEY,
   FIELD_SNIPPET,
+  FIELD_SPARSE_BM25,
   FIELD_TEXT,
   FIELD_UPDATED_AT,
   OUTPUT_FIELDS,
+  computeContentHash,
   entryToInsertData,
   rowToMemoryEntry,
   rowToMemoryReference,
@@ -59,6 +62,13 @@ export interface MilvusSearchConfig {
     model: string;
     dimensions?: number;
   };
+  /** Search weight configuration (default: vectorWeight=0.7, textWeight=0.3) */
+  search?: {
+    vectorWeight?: number;
+    textWeight?: number;
+    /** Enable native BM25 hybrid search when Milvus ≥ 2.4 has BM25 Function (default: false) */
+    useBM25?: boolean;
+  };
 }
 
 // ── 默认参数 ──────────────────────────────────────────────────────
@@ -73,7 +83,14 @@ const VECTOR_FETCH_MULTIPLIER = 3;
 // ── 关键词抽取 ────────────────────────────────────────────────────
 
 /**
- * 从查询文本中抽取关键词（用于 scalar filter）
+ * 从查询文本中抽取关键词（用于 scalar filter / BM25 查询向量构建）。
+ *
+ * 算法为简单 Unicode 分词：提取 \\p{L}\\p{N}_ 连续序列，去重，过滤长度 < 2。
+ * 这产生的是**偏上限**的关键词集合——客户端无法实现服务端 BM25 的
+ * 语言感知分词（如中文分词、词干提取、停用词过滤），因此召回会偏多
+ * 但不会漏。BM25 原生路径下此集合仅用于构建 query sparse vector，
+ * 实际 BM25 计算由服务端 Function 负责。
+ *
  * 返回去重后的关键词列表。
  */
 function extractKeywords(query: string): string[] {
@@ -109,6 +126,8 @@ function buildKeywordFilter(keywords: string[], agentId?: string): string {
 /**
  * Build a Milvus scalar filter expression from structured filter options.
  * Used for agentId / sessionKey / memoryType / createdAfter filtering.
+ * When memoryType is not specified and excludeArchived is true (default),
+ * archived entries are excluded from results.
  * Returns "" if no filters are specified.
  */
 function buildScalarFilter(opts: {
@@ -116,6 +135,7 @@ function buildScalarFilter(opts: {
   sessionKey?: string;
   memoryType?: string;
   createdAfter?: string;
+  excludeArchived?: boolean;
 }): string {
   const parts: string[] = [];
 
@@ -127,6 +147,9 @@ function buildScalarFilter(opts: {
   }
   if (opts.memoryType) {
     parts.push(`${FIELD_MEMORY_TYPE} == "${opts.memoryType.replace(/"/g, '\\"')}"`);
+  } else if (opts.excludeArchived !== false) {
+    // Default: exclude archived unless explicitly overridden
+    parts.push(`${FIELD_MEMORY_TYPE} != "archived"`);
   }
   if (opts.createdAfter) {
     parts.push(`${FIELD_CREATED_AT} >= "${opts.createdAfter.replace(/"/g, '\\"')}"`);
@@ -345,6 +368,8 @@ export class MilvusSearchManager {
       agentId?: string;
       /** Filter by memory_type (e.g. "short_term", "long_term", "archived") */
       memoryType?: string;
+      /** Include archived entries in search results (default: false) */
+      includeArchived?: boolean;
       /** Filter by created_at >= this ISO timestamp */
       createdAfter?: string;
       qmdSearchModeOverride?: "query" | "search" | "vsearch";
@@ -367,6 +392,7 @@ export class MilvusSearchManager {
       sessionKey: opts?.sessionKey,
       memoryType: opts?.memoryType,
       createdAfter: opts?.createdAfter,
+      excludeArchived: !opts?.includeArchived,
     });
 
     // 清理查询文本
@@ -379,37 +405,60 @@ export class MilvusSearchManager {
       return refs.filter((r) => r.score >= minScore).slice(0, maxResults);
     }
 
-    // 1. 向量 ANN 搜索
-    let vectorRefs: MemoryReference[] = [];
+    // 1. 获取查询向量
+    let queryVec: number[] = [];
     try {
-      const queryVec = await this.provider.embedQuery(cleaned);
-      const hasVector = queryVec.some((v) => v !== 0);
-      if (hasVector) {
-        vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit, scalarFilter);
-      }
+      queryVec = await this.provider.embedQuery(cleaned);
     } catch (err) {
-      // 向量搜索失败不阻断整体搜索
-      console.warn("[memory-milvus] vector search failed:", err);
+      console.warn("[memory-milvus] embedding failed:", err);
     }
+    const hasVector = queryVec.length > 0 && queryVec.some((v) => v !== 0);
 
-    // 2. 文本关键词搜索
-    let keywordRefs: MemoryReference[] = [];
-    const keywords = extractKeywords(cleaned);
-    if (keywords.length > 0) {
-      try {
-        keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit, scalarFilter);
-      } catch (err) {
-        console.warn("[memory-milvus] keyword search failed:", err);
+    // 2. 尝试原生 BM25 混合搜索（useBM25=true 且 Milvus ≥ 2.4 有 BM25 Function）
+    const useBM25 = this.cfg.search?.useBM25 ?? false;
+    let merged: MemoryReference[] | undefined;
+
+    if (useBM25 && hasVector) {
+      const bm25Results = await this.searchBM25(
+        queryVec, cleaned, effectiveAgentId, fetchLimit, scalarFilter,
+      );
+      if (bm25Results !== null) {
+        // 应用时间衰减（legacy 路径由 mergeResults 内置衰减）
+        merged = bm25Results.map((r) => ({
+          ...r,
+          score: r.score * temporalDecayFactor(
+            (r as Record<string, unknown>)[FIELD_CREATED_AT] as string ?? "", 30,
+          ),
+        }));
       }
+      // null → 降级到 legacy 路径
     }
 
-    // 3. 评分融合
-    const merged = this.mergeResults(
-      vectorRefs,
-      keywordRefs,
-      DEFAULT_VECTOR_WEIGHT,
-      DEFAULT_TEXT_WEIGHT,
-    );
+    // 3. Legacy 路径: 独立 ANN + 关键词搜索 + 评分融合（含衰减）
+    if (!merged) {
+      let vectorRefs: MemoryReference[] = [];
+      if (hasVector) {
+        try {
+          vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit, scalarFilter);
+        } catch (err) {
+          console.warn("[memory-milvus] vector search failed:", err);
+        }
+      }
+
+      let keywordRefs: MemoryReference[] = [];
+      const keywords = extractKeywords(cleaned);
+      if (keywords.length > 0) {
+        try {
+          keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit, scalarFilter);
+        } catch (err) {
+          console.warn("[memory-milvus] keyword search failed:", err);
+        }
+      }
+
+      const vw = this.cfg.search?.vectorWeight ?? DEFAULT_VECTOR_WEIGHT;
+      const tw = this.cfg.search?.textWeight ?? DEFAULT_TEXT_WEIGHT;
+      merged = this.mergeResults(vectorRefs, keywordRefs, vw, tw);
+    }
 
     // 4. MMR 重排序
     const mmrResults = applyMMR(merged, 0.7, maxResults * 2);
@@ -502,6 +551,84 @@ export class MilvusSearchManager {
       ref.score = ref.textScore;
       return ref;
     });
+  }
+
+  // ── BM25 原生搜索（hybridSearch + WeightedRanker）───────────
+
+  /**
+   * Try native BM25 hybrid search when Milvus ≥ 2.4 has a BM25 Function
+   * mapping FIELD_TEXT → FIELD_SPARSE_BM25.
+   *
+   * Uses a single hybridSearch call with two ANN fields:
+   *   - FIELD_EMBEDDING (dense vector, weighted by cfg.search.vectorWeight)
+   *   - FIELD_SPARSE_BM25 (sparse BM25 vector, weighted by cfg.search.textWeight)
+   * combined via WeightedRanker.
+   *
+   * Returns null if the BM25 Function is not available on the server,
+   * signalling the caller to fall back to separate ANN + TF-IDF.
+   */
+  private async searchBM25(
+    queryVec: number[],
+    queryText: string,
+    _agentId: string,
+    limit: number,
+    scalarFilter: string,
+  ): Promise<MemoryReference[] | null> {
+    try {
+      // Build a sparse vector dict from query keywords for BM25. When the
+      // server-side BM25 Function exists, Milvus applies the same tokenization
+      // and weighting to the query.  Passing a dict with term→1.0 weight lets
+      // the Function produce the final BM25-weighted sparse vector.
+      const keywords = extractKeywords(queryText);
+      const sparseVec: Record<string, number> = {};
+      for (const kw of keywords) {
+        sparseVec[kw] = 1.0;
+      }
+
+      const vw = this.cfg.search?.vectorWeight ?? DEFAULT_VECTOR_WEIGHT;
+      const tw = this.cfg.search?.textWeight ?? DEFAULT_TEXT_WEIGHT;
+
+      const grpcClient = this.client as unknown as {
+        hybridSearch(
+          req: Record<string, unknown>,
+        ): Promise<{ results: Array<{ id: string; score: number; [key: string]: unknown }> }>;
+      };
+
+      const result = await grpcClient.hybridSearch({
+        collection_name: this.collectionName,
+        data: [
+          {
+            anns_field: FIELD_EMBEDDING,
+            data: queryVec,
+            expr: scalarFilter || undefined,
+          },
+          {
+            anns_field: FIELD_SPARSE_BM25,
+            data: sparseVec,
+            expr: scalarFilter || undefined,
+          },
+        ],
+        rerank: {
+          strategy: "weighted",
+          params: { weights: [vw, tw] },
+        },
+        output_fields: [...OUTPUT_FIELDS],
+        limit,
+      });
+
+      if (!result.results || result.results.length === 0) {
+        return [];
+      }
+
+      return result.results.map((r) => {
+        const ref = rowToMemoryReference(r as unknown as Record<string, unknown>);
+        ref.score = typeof r.score === "number" ? r.score : 0;
+        return ref;
+      });
+    } catch {
+      // BM25 Function not available or hybridSearch failed → fall back
+      return null;
+    }
   }
 
   // ── 纯标量过滤查询（无语义搜索） ──────────────────────────────
@@ -656,6 +783,7 @@ export class MilvusSearchManager {
         FIELD_RECALL_COUNT,
         FIELD_PROVENANCE_KIND,
         FIELD_PROVENANCE_LABEL,
+        FIELD_CONTENT_HASH,
         FIELD_CREATED_AT,
         FIELD_UPDATED_AT,
         FIELD_LAST_RECALLED_AT,
@@ -667,6 +795,128 @@ export class MilvusSearchManager {
     }
 
     return rowToMemoryEntry(response.data[0] as Record<string, unknown>);
+  }
+
+  // ── update(id, patch) — MemoryDataBackend.update ──────────────
+
+  /**
+   * 更新一条记忆：query → merge patch → re-embed if text changed → upsert。
+   *
+   * @param id   目标记录主键
+   * @param patch 要合并的字段（text/snippet/memoryType/sessionKey/provenanceLabel）
+   * @returns 更新后的 MemoryEntry
+   *
+   * 失败语义（§12.7）：not-found / closed / degraded → throw；
+   * update 失败直接抛出，不走 fallback（update 是精确操作，不可丢）。
+   */
+  async update(
+    id: string,
+    patch: {
+      text?: string;
+      snippet?: string;
+      memoryType?: string;
+      sessionKey?: string;
+      provenanceLabel?: string;
+    },
+  ): Promise<MemoryEntry> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) throw new Error("MilvusSearchManager is in degraded mode");
+
+    const rawId = id.trim();
+    if (!rawId) throw new Error("Missing memory id");
+    if (!patch || Object.keys(patch).length === 0) {
+      throw new Error("Update patch must contain at least one field");
+    }
+
+    // Step 1: query existing
+    const existing = await this.get(rawId);
+
+    // Step 2: merge
+    const now = new Date().toISOString();
+    const merged: Omit<MemoryEntry, "id"> = {
+      text: patch.text ?? existing.text,
+      snippet: patch.snippet ?? existing.snippet,
+      agentId: existing.agentId,
+      sessionKey: patch.sessionKey !== undefined ? patch.sessionKey : existing.sessionKey,
+      memoryType: patch.memoryType as MemoryEntry["memoryType"] ?? existing.memoryType,
+      recallCount: existing.recallCount,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+      provenance: {
+        kind: existing.provenance.kind,
+        label: patch.provenanceLabel ?? existing.provenance.label,
+      },
+    };
+
+    // Step 3: re-embed if text changed, else reuse existing embedding
+    const textChanged = patch.text !== undefined && patch.text !== existing.text;
+    const needsReembed = textChanged ||
+      (patch.provenanceLabel !== undefined && patch.provenanceLabel !== existing.provenance.label);
+
+    let vector: number[];
+    let contentHash: string;
+
+    if (needsReembed) {
+      vector = await this.provider.embedQuery(merged.text);
+      if (!vector || vector.every((v) => v === 0)) {
+        throw new Error("Embedding returned empty vector during update");
+      }
+      contentHash = computeContentHash(merged.text, merged.provenance?.label);
+    } else {
+      // Reuse existing embedding — query it
+      const embResponse = await this.client.query({
+        collection_name: this.collectionName,
+        filter: `${FIELD_ID} == ${rawId}`,
+        output_fields: [FIELD_EMBEDDING, FIELD_CONTENT_HASH],
+        limit: 1,
+      });
+      const embRow = embResponse.data?.[0] as Record<string, unknown>;
+      vector = (embRow?.[FIELD_EMBEDDING] as number[]) ?? [];
+      contentHash = String(embRow?.[FIELD_CONTENT_HASH] ?? "");
+    }
+
+    // Step 4: upsert
+    const data = entryToInsertData(merged);
+    data[FIELD_ID] = Number(rawId);
+    data[FIELD_EMBEDDING] = vector;
+    data[FIELD_CONTENT_HASH] = contentHash;
+
+    await this.client.upsert({
+      collection_name: this.collectionName,
+      data: [data as unknown as RowData],
+    });
+
+    // Return updated entry
+    return {
+      id: rawId,
+      ...merged,
+    };
+  }
+
+  // ── archive(id) — 软删除 ────────────────────────────────────
+
+  /**
+   * 软删除一条记忆：设置 memory_type = "archived"。
+   *
+   * 搜索默认排除 archived 类型，`includeArchived: true` 可查。
+   * 与 update 一致，失败直接 throw，不走 fallback。
+   */
+  async archive(id: string): Promise<void> {
+    if (this.closed) throw new Error("MilvusSearchManager is closed");
+    if (this.degraded) throw new Error("MilvusSearchManager is in degraded mode");
+
+    const rawId = id.trim();
+    if (!rawId) throw new Error("Missing memory id");
+
+    const now = new Date().toISOString();
+    await this.client.upsert({
+      collection_name: this.collectionName,
+      data: [{
+        [FIELD_ID]: Number(rawId),
+        [FIELD_MEMORY_TYPE]: "archived",
+        [FIELD_UPDATED_AT]: now,
+      }] as unknown as RowData[],
+    });
   }
 
   // ── 写入（MemoryDataBackend.write） ───────────────────────────
@@ -734,10 +984,18 @@ export class MilvusSearchManager {
   /**
    * embed + insert 一条 MemoryEntry 到 Milvus。
    * 返回 MemoryReference（id 为 Milvus 自增主键）。
+   *
+   * 入库前按 content_hash 查重：已存在则直接返回已有记录的 MemoryReference，
+   * 不重新 embed/insert。
    */
   private async insertEntry(
     entry: Omit<MemoryEntry, "id">,
   ): Promise<MemoryReference> {
+    // Dedup: check content_hash before insert
+    const contentHash = computeContentHash(entry.text, entry.provenance?.label);
+    const existingRef = await this.findByContentHash(contentHash);
+    if (existingRef) return existingRef;
+
     const vector = await this.provider.embedQuery(entry.text);
     if (!vector || vector.every((v) => v === 0)) {
       throw new Error("Embedding returned empty vector");
@@ -745,6 +1003,7 @@ export class MilvusSearchManager {
 
     const data = entryToInsertData(entry);
     data[FIELD_EMBEDDING] = vector;
+    data[FIELD_CONTENT_HASH] = contentHash;
 
     const result = await this.client.insert({
       collection_name: this.collectionName,
@@ -764,6 +1023,29 @@ export class MilvusSearchManager {
         label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
       },
     };
+  }
+
+  /**
+   * 按 content_hash 查询是否已存在重复记录。
+   * 存在时返回已有记录的 MemoryReference，否则返回 null。
+   * 存量数据无 content_hash 时靠 provenance_label 兜底不强一致回填。
+   */
+  private async findByContentHash(hash: string): Promise<MemoryReference | null> {
+    if (!hash) return null;
+    try {
+      const response = await this.client.query({
+        collection_name: this.collectionName,
+        filter: `${FIELD_CONTENT_HASH} == "${hash.replace(/"/g, '\\"')}"`,
+        output_fields: [FIELD_ID, FIELD_SNIPPET, FIELD_PROVENANCE_KIND, FIELD_PROVENANCE_LABEL],
+        limit: 1,
+      });
+      if (response.data?.length) {
+        return rowToMemoryReference(response.data[0] as Record<string, unknown>);
+      }
+    } catch {
+      // 查重失败不阻塞写入
+    }
+    return null;
   }
 
   // ── 健康探测 ──────────────────────────────────────────────────
@@ -829,10 +1111,10 @@ export class MilvusSearchManager {
     if (!ids.length) return;
 
     try {
-      // Step 1: query 当前字段
+      // Step 1: query 当前字段（agent 隔离）
       const queryResponse = await this.client.query({
         collection_name: this.collectionName,
-        filter: `id in [${ids.join(",")}]`,
+        filter: `id in [${ids.join(",")}] && ${FIELD_AGENT_ID} == "${this.agentId.replace(/"/g, '\\"')}"`,
         output_fields: [
           FIELD_ID,
           FIELD_RECALL_COUNT,
@@ -843,6 +1125,7 @@ export class MilvusSearchManager {
           FIELD_MEMORY_TYPE,
           FIELD_PROVENANCE_KIND,
           FIELD_PROVENANCE_LABEL,
+          FIELD_CONTENT_HASH,
           FIELD_CREATED_AT,
           FIELD_UPDATED_AT,
           FIELD_LAST_RECALLED_AT,
@@ -881,6 +1164,7 @@ export class MilvusSearchManager {
           row[FIELD_MEMORY_TYPE] = existing[FIELD_MEMORY_TYPE];
           row[FIELD_PROVENANCE_KIND] = existing[FIELD_PROVENANCE_KIND];
           row[FIELD_PROVENANCE_LABEL] = existing[FIELD_PROVENANCE_LABEL];
+          row[FIELD_CONTENT_HASH] = existing[FIELD_CONTENT_HASH];
           row[FIELD_CREATED_AT] = existing[FIELD_CREATED_AT];
         }
 

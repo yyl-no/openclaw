@@ -848,3 +848,97 @@
 - ❌ `docs/plugins/memory-milvus.md` 用户指南 → Task 16 或独立 docs 任务
 - ❌ `openclaw doctor` 扩展 milvus 连通性检查 → Task 16 以后
 - ❌ SDK backend 枚举正式扩展 `"milvus"` → Task 16（§13.4 Q3.2）
+
+---
+
+## Task 16: 插件收尾——除向量库本身限制外全面对齐官方
+
+> 状态：进行中（T16-1 至 T16-8 已完成，T16-9/T16-10 待执行）
+
+### T16-1: 去重 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：
+- `schema.ts`：新增 `FIELD_CONTENT_HASH` + `computeContentHash()`
+- `search.ts`：`insertEntry()` 入库前 `findByContentHash()` 查重，`write()` 全链路含去重
+- `update()`：text 变更时重算 content_hash
+
+### T16-2: update ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：
+- `search.ts`：`update(id, patch)` — query → merge patch → 必要时重 embed → upsert
+
+### T16-3: 软删除 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：
+- `search.ts`：`archive(id)` 设 `memory_type="archived"`
+- `buildScalarFilter`：默认排除 archived，`includeArchived: true` 可查
+
+### T16-4: agent_id 查询过滤 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：
+- `search()` / `get()` / `recordRecall()` 全链路追加 agent_id expr 过滤
+
+### T16-5: citation 装饰 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：修复剩余 1 个失败测试
+
+### T16-6: SDK backend 枚举扩展 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：`packages/memory-host-sdk` 中新增 `"milvus"` 枚举值，撤下 memory-milvus 中伪装 qmd 的 stub
+
+### T16-7: backend 侧 session 可见性 expr 原生过滤 ✅ 完成
+
+**日期**：2026-05-13
+
+**改动**：`buildScalarFilter` 支持 `sessionKey` expr，search 时双层叠加（Milvus expr + 应用层过滤）
+
+### T16-8: BM25 原生升级 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task16-8 + `2-decisions.md` §8.1/§15
+
+**子任务**：
+
+| # | 子任务 | 文件 |
+|---|--------|------|
+| 8a | `schema.ts` 新增 `FIELD_SPARSE_BM25` + `BM25_FIELD_DESCRIPTION` 常量 | `schema.ts` |
+| 8b | `collection-bootstrap` 加 sparse_bm25 字段（SparseFloatVector）+ SPARSE_INVERTED_INDEX 索引 | `collection-bootstrap.ts`、`collection-bootstrap.test.ts` |
+| 8c | `MilvusSearchConfig.search` 参数化 vectorWeight/textWeight/useBM25 | `search.ts` |
+| 8d | `searchBM25()` 方法：hybridSearch + WeightedRanker，失败返回 null 降级 | `search.ts` |
+| 8e | `mergeResults` 使用可配置 w1/w2 | `search.ts` |
+| 8f | `extractKeywords` 注释说明其偏上限 | `search.ts` |
+| 8g | README 补 BM25 服务端 Function 创建运维步骤（RESTful + pymilvus） | `README.md` |
+| 8h | 测试验证：133 tests passed | — |
+
+**BM25 降级链路**：
+```
+search()
+  ├─ useBM25=true? → searchBM25() via hybridSearch
+  │   ├─ success → apply decay + MMR → done
+  │   └─ null (Function missing / error) → legacy path
+  └─ legacy: searchVector() + searchKeyword() → mergeResults → MMR
+```
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 9 files, **133 tests** passed
+- `pnpm tsgo:extensions` → memory-milvus **0 新增错误**（仅 1 预存：tools.search.ts filterMemorySearchHitsBySessionVisibility）
+
+### 待执行
+
+| ID | 任务 | 状态 |
+|----|------|------|
+| T16-9 | 多corpus全量: sessions/wiki/all + supplement | ⏳ PENDING |
+| T16-10 | memory_write 对称: core注册 + pi-tools白名单下沉 | ⏳ PENDING |

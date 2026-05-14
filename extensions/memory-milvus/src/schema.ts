@@ -19,11 +19,26 @@
  * │ provenance_label     │ provenance.label     │ provenance.label     │
  * │ created_at           │ createdAt            │ —                    │
  * │ updated_at           │ updatedAt            │ —                    │
+ * │ last_recalled_at     │ —                    │ — (内部使用)          │
+ * │ content_hash         │ — (内部使用)          │ — (内部使用)          │
+ * │ sparse_bm25          │ — (内部使用)          │ — (内部使用)          │
  * │ score                │ —                    │ score (运行时计算)     │
  * └──────────────────────┴─────────────────────┴──────────────────────┘
  */
 
+import { createHash } from "node:crypto";
 import type { MemoryEntry, MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+
+// ── 内容哈希 ──────────────────────────────────────────────────────
+
+/**
+ * 计算内容去重哈希：SHA-256(text + "\0" + provenance_label)。
+ * provenance_label 为 undefined 时用空字符串。
+ */
+export function computeContentHash(text: string, provenanceLabel?: string): string {
+  const label = provenanceLabel ?? "";
+  return createHash("sha256").update(`${text}\0${label}`).digest("hex");
+}
 
 // ── Milvus 字段名常量 ──────────────────────────────────────────────
 
@@ -40,8 +55,10 @@ export const FIELD_PROVENANCE_LABEL = "provenance_label";
 export const FIELD_CREATED_AT = "created_at";
 export const FIELD_UPDATED_AT = "updated_at";
 export const FIELD_LAST_RECALLED_AT = "last_recalled_at";
+export const FIELD_CONTENT_HASH = "content_hash";
+export const FIELD_SPARSE_BM25 = "sparse_bm25";
 
-/** 所有字段名集合 */
+/** 所有字段名集合（不含内部向量字段 embedding / sparse_bm25） */
 export const ALL_SCHEMA_FIELDS = [
   FIELD_ID,
   FIELD_EMBEDDING,
@@ -56,6 +73,7 @@ export const ALL_SCHEMA_FIELDS = [
   FIELD_CREATED_AT,
   FIELD_UPDATED_AT,
   FIELD_LAST_RECALLED_AT,
+  FIELD_CONTENT_HASH,
 ] as const;
 
 // ── Schema 配置常量 ────────────────────────────────────────────────
@@ -89,6 +107,12 @@ export const PROVENANCE_KIND_MAX_LENGTH = 32;
 
 /** provenance_label 字段最大长度 */
 export const PROVENANCE_LABEL_MAX_LENGTH = 1024;
+
+/** content_hash 字段最大长度（SHA-256 hex） */
+export const CONTENT_HASH_MAX_LENGTH = 64;
+
+/** BM25 稀疏向量字段（SparseFloatVector，Milvus ≥ 2.4 BM25 Function） */
+export const BM25_FIELD_DESCRIPTION = "BM25 sparse vector (requires server-side BM25 Function)";
 
 /** 时间戳字段最大长度（ISO 8601 格式） */
 export const TIMESTAMP_MAX_LENGTH = 32;
@@ -169,5 +193,6 @@ export function entryToInsertData(
     [FIELD_CREATED_AT]: entry.createdAt ?? now,
     [FIELD_UPDATED_AT]: entry.updatedAt ?? now,
     [FIELD_LAST_RECALLED_AT]: "",
+    [FIELD_CONTENT_HASH]: computeContentHash(entry.text, entry.provenance?.label),
   };
 }
