@@ -89,13 +89,35 @@ import {
   type ToolSearchCatalogToolExecutor,
 } from "./tool-search.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
+import { getMemoryCapabilityRegistration } from "../plugins/memory-state.js";
 
 function isOpenAIProvider(provider?: string) {
   const normalized = normalizeOptionalLowercaseString(provider);
   return normalized === "openai" || normalized === "openai-codex";
 }
 
-const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write", "memory_write"]);
+const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write"]);
+// Merge memory write tool names from active memory plugin capability (lazy init).
+let _memoryWriteToolNamesResolved = false;
+function resolveMemoryWriteToolNames(): Set<string> {
+  if (_memoryWriteToolNamesResolved) return MEMORY_FLUSH_ALLOWED_TOOL_NAMES;
+  _memoryWriteToolNamesResolved = true;
+  try {
+    const cap = getMemoryCapabilityRegistration()?.capability;
+    if (cap?.writeToolNames) {
+      for (const name of cap.writeToolNames) {
+        MEMORY_FLUSH_ALLOWED_TOOL_NAMES.add(name);
+      }
+    }
+  } catch {
+    // Fallback for when memory-state is unavailable
+  }
+  // Backward compatible: always include memory_write if no capability declares it
+  if (!MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has("memory_write")) {
+    MEMORY_FLUSH_ALLOWED_TOOL_NAMES.add("memory_write");
+  }
+  return MEMORY_FLUSH_ALLOWED_TOOL_NAMES;
+}
 
 type BashToolsModule = typeof import("./bash-tools.js");
 
@@ -852,7 +874,7 @@ export function createOpenClawCodingTools(options?: {
   const toolsForMemoryFlush: AnyAgentTool[] = isMemoryFlushRun ? [] : tools;
   if (isMemoryFlushRun) {
     for (const tool of tools) {
-      if (!MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has(tool.name)) {
+      if (!resolveMemoryWriteToolNames().has(tool.name)) {
         continue;
       }
       if (tool.name === "write" && !isMilvusBackend && memoryFlushWritePath) {

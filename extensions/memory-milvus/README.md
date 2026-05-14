@@ -107,13 +107,18 @@ search()
   └─ legacy: searchVector() + searchKeyword() → mergeResults → MMR
 ```
 
+## Citation control
+
+`memory_search` honors `cfg.memory.citations` ("on" | "off" | "auto") to
+append source citations (`\n\nSource: ...`) to search result snippets.
+Auto mode enables citations for direct chats, disables for group/channel
+contexts. Citation decoration is shared with memory-core via the runtime-api barrel.
+
 ## Not yet available
 
 | Capability | Target |
 |---|---|
-| Citation decoration pipeline | Task 16 |
-| Multi-corpus support (sessions / wiki) | Task 16 |
-| 9-dim advanced recall signals | Task 16 |
+| 9-dim advanced recall signals | TBD |
 
 ## Enable
 

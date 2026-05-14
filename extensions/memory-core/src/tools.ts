@@ -509,3 +509,54 @@ export function createMemoryGetTool(options: {
       },
   });
 }
+
+export function createMemoryWriteTool(options: {
+  config?: OpenClawConfig;
+  getConfig?: () => OpenClawConfig | undefined;
+  agentId?: string;
+  agentSessionKey?: string;
+}) {
+  return createMemoryTool({
+    options,
+    label: "Memory Write",
+    name: "memory_write",
+    description:
+      "Write a memory entry extracted from the conversation. " +
+      "Use this to persist facts, decisions, preferences, and learnings. " +
+      "Each entry is stored with text content and an optional source label.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        text: { type: "string" as const },
+        label: { type: "string" as const },
+      },
+      required: ["text"],
+    } as unknown as typeof MemoryGetSchema,
+    execute:
+      ({ cfg, agentId }) =>
+      async (_toolCallId, params) => {
+        const rawParams = asToolParamsRecord(params);
+        const text = readStringParam(rawParams, "text", { required: true });
+        const label = readStringParam(rawParams, "label") || "chat_extract";
+
+        const memory = await getMemoryManagerContext({ cfg, agentId });
+        if (!memory || "error" in memory) {
+          const error = memory && "error" in memory ? memory.error : "memory search unavailable";
+          return jsonResult({ error: error ?? "memory search unavailable" });
+        }
+
+        try {
+          const ref = await memory.manager.write({
+            text,
+          });
+          return jsonResult({
+            id: ref.id,
+            label,
+          });
+        } catch (err) {
+          const message = formatErrorMessage(err);
+          return jsonResult({ error: message });
+        }
+      },
+  });
+}

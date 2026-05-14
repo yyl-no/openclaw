@@ -134,6 +134,8 @@ export type MemoryPluginCapability = {
   flushPlanResolver?: MemoryFlushPlanResolver;
   runtime?: MemoryPluginRuntime;
   publicArtifacts?: MemoryPluginPublicArtifactsProvider;
+  /** Memory write tool names declared by this plugin. Used by pi-tools to build the memory-flush allowlist. */
+  writeToolNames?: string[];
 };
 
 export type MemoryPluginCapabilityRegistration = {

@@ -936,9 +936,84 @@ search()
 - `pnpm test extensions/memory-milvus` → 9 files, **133 tests** passed
 - `pnpm tsgo:extensions` → memory-milvus **0 新增错误**（仅 1 预存：tools.search.ts filterMemorySearchHitsBySessionVisibility）
 
-### 待执行
+### T16-9: 多 corpus 全量支持 ✅ 完成
 
-| ID | 任务 | 状态 |
-|----|------|------|
-| T16-9 | 多corpus全量: sessions/wiki/all + supplement | ⏳ PENDING |
-| T16-10 | memory_write 对称: core注册 + pi-tools白名单下沉 | ⏳ PENDING |
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task16-9
+
+**子任务**：
+
+| # | 子任务 | 说明 |
+|---|--------|------|
+| 9a | runtime-api.ts 导出 | `searchMemoryCorpusSupplements` / `getMemoryCorpusSupplementResult` 通过 memory-core barrel 导出 |
+| 9b | tools.search.ts 重写 | `corpus=sessions` → milvus + sessionKey 过滤；`wiki` → supplement；`all` → 双路合并排序 |
+| 9c | 测试更新 | 15 tests 覆盖 5 种 corpus 路由 |
+| 9d | 零回归验证 | `pnpm test extensions/memory-milvus` 134 passed |
+
+**验收证据**：`pnpm test extensions/memory-milvus` → 9 files, 134 tests passed
+
+### T16-10: memory_write 对称规划 ✅ 完成
+
+**日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task16-10 + `2-decisions.md` Q2β 折中
+
+**子任务**：
+
+| # | 子任务 | 文件 |
+|---|--------|------|
+| 10a | memory-core 注册 `memory_write` 工具 | `extensions/memory-core/src/tools.ts`（+54行 `createMemoryWriteTool`）、`index.ts` |
+| 10b | `MemoryPluginCapability` 新增 `writeToolNames?: string[]` | `src/plugins/memory-state.ts` |
+| 10c | 两插件 capability 声明 `writeToolNames: ["memory_write"]` | `memory-core/index.ts` L196、`memory-milvus/index.ts` L241 |
+| 10d | pi-tools 白名单从硬编码改为从 capability 动态读取 | `src/agents/pi-tools.ts` L99-120 `resolveMemoryWriteToolNames()` |
+| 10e | 全量回归验证 | `pnpm build` 全绿，`pnpm test extensions/memory-milvus` 134 passed，memory-core failures 为 Windows 预存 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 134 tests passed
+- `pnpm build` → 全绿
+- backward-compatible: 无 capability 时仍兜底添加 `memory_write`
+
+---
+
+## ✅ Task 16 全部完成（2026-05-13）
+
+### 10 项完成清单
+
+| # | 任务 | 状态 | 核心文件 |
+|---|------|------|----------|
+| 1 | 去重 (content_hash) | ✅ | `schema.ts`, `search.ts` |
+| 2 | update(id, patch) | ✅ | `search.ts` |
+| 3 | 软删除 archive(id) | ✅ | `search.ts` (memory_type="archived") |
+| 4 | agent_id 过滤 | ✅ | `search.ts` (search/get/recordRecall) |
+| 5 | citation 装饰 | ✅ | 通过 `runtime-api.ts` barrel 调 `decorateCitations` |
+| 6 | SDK backend 枚举 milvus | ✅ | `packages/memory-host-sdk` |
+| 7 | session 可见性 expr | ✅ | `search.ts` (buildScalarFilter) |
+| 8 | BM25 原生升级 | ✅ | `search.ts` (searchBM25), `schema.ts`, README |
+| 9 | 多corpus全量 | ✅ | `tools.search.ts` (sessions/wiki/all) |
+| 10 | memory_write 对称 | ✅ | `pi-tools.ts`, `memory-state.ts`, 两插件 capability |
+
+### 1 项不做
+
+| 项目 | 说明 |
+|------|------|
+| 9 维高级召回信号 | `dailyCount`/`groundedCount`/`totalScore`/`maxScore`/`queryHashes` 等 — 占位待定 |
+
+### 验收总表
+
+| 检查项 | 结果 |
+|--------|------|
+| `pnpm test extensions/memory-milvus` | **9 files, 134 tests** 全绿 |
+| `pnpm build` | 全绿 |
+| `pnpm tsgo:extensions` | memory-milvus **0 错误** |
+| memory-core 回归 | 通过（失败项为 Windows 预存） |
+| 10 项全覆盖单测 | ✅ |
+| README BM25 运维步骤 | ✅ |
+
+### 遗留（非阻塞）
+
+| 项目 | 说明 |
+|------|------|
+| README `cfg.memory.citations` 开关说明 | 功能已实现，README "Not yet available" 需刷新 |
+| `OPENCLAW_LIVE_TEST=1` 端到端 | 需真实 Milvus + embedding API key |
+| 9 维高级召回信号 | 占位待定，不影响能力对齐 |

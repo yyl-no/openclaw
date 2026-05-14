@@ -39,3 +39,7 @@ export {
   shouldIncludeCitations,
 } from "./src/tools.citations.js";
 export { filterMemorySearchHitsBySessionVisibility } from "./src/session-search-visibility.js";
+export {
+  searchMemoryCorpusSupplements,
+  getMemoryCorpusSupplementResult,
+} from "./src/tools.shared.js";

@@ -484,7 +484,9 @@ type MemoryFlushPlan = {
 - **验收标准**：新增的切换集成测试 3 个场景全绿 · `pnpm check:changed` 绿 · README 列出可照抄的配置片段
 - 详见 decisions §6 / §11 / §13.4 Q3.3-Q3.4 / Q3.5
 
-### Task 16: 插件收尾——除向量库本身限制外全面对齐官方
+### Task 16: 插件收尾——除向量库本身限制外全面对齐官方 ✅ 完成
+
+> **状态**：✅ 完成于 2026-05-13
 
 - **总原则**：除 Milvus 向量库本身不可克服的限制（如原子 update / Function-as-code BM25）外，插件能力与 memory-core 官方全面对齐
 

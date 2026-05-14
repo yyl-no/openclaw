@@ -143,6 +143,20 @@ function createLazyMemoryGetTool(options: MemoryToolOptions): AnyAgentTool | nul
   });
 }
 
+function createLazyMemoryWriteTool(options: MemoryToolOptions): AnyAgentTool | null {
+  return createLazyMemoryTool({
+    options,
+    label: "Memory Write",
+    name: "memory_write" as "memory_search",
+    description:
+      "Write a memory entry extracted from the conversation. " +
+      "Use this to persist facts, decisions, preferences, and learnings. " +
+      "Each entry is stored with text content and an optional source label.",
+    parameters: MemoryGetSchema,
+    load: (module, loadOptions) => module.createMemoryWriteTool(loadOptions),
+  });
+}
+
 function resolveMemoryToolOptions(ctx: OpenClawPluginToolContext): MemoryToolOptions {
   const getConfig = () => ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
   return {
@@ -179,6 +193,7 @@ export default definePluginEntry({
       promptBuilder: buildPromptSection,
       flushPlanResolver: buildMemoryFlushPlan,
       runtime: memoryRuntime,
+      writeToolNames: ["memory_write"],
       publicArtifacts: {
         async listArtifacts(params) {
           const { listMemoryCorePublicArtifacts } = await import("./src/public-artifacts.js");
@@ -193,6 +208,10 @@ export default definePluginEntry({
 
     api.registerTool((ctx) => createLazyMemoryGetTool(resolveMemoryToolOptions(ctx)), {
       names: ["memory_get"],
+    });
+
+    api.registerTool((ctx) => createLazyMemoryWriteTool(resolveMemoryToolOptions(ctx)), {
+      names: ["memory_write"],
     });
 
     api.registerCommand({

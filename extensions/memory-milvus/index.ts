@@ -238,6 +238,7 @@ export default definePluginEntry({
       promptBuilder: buildPromptSection,
       flushPlanResolver: buildMilvusFlushPlan,
       runtime: milvusRuntime,
+      writeToolNames: ["memory_write"],
     });
 
     // memory_write 工具：AI flush turn 调此写入，内部走 Manager.write()

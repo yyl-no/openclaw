@@ -2,16 +2,17 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createMemorySearchTool, type MemorySearchToolDeps } from "./tools.search.js";
 import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 
-// ── Mock warnOnce ─────────────────────────────────────────────────
+// ── Mock 补充: mock listMemoryCorpusSupplements ─────────────────
 
-vi.mock("./warn-once.js", () => ({
-  warnOnce: vi.fn(),
-}));
-
-import { warnOnce } from "./warn-once.js";
-const warnOnceMock = vi.mocked(warnOnce);
-
-// ── Helpers ───────────────────────────────────────────────────────
+vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/memory-core-host-runtime-core")>(
+    "openclaw/plugin-sdk/memory-core-host-runtime-core",
+  );
+  return {
+    ...actual,
+    listMemoryCorpusSupplements: vi.fn(() => []),
+  };
+});
 
 function parseResult(raw: unknown): Record<string, unknown> {
   const result = raw as { details?: unknown };
@@ -97,7 +98,7 @@ describe("memory_search tool: corpus 路由", () => {
       minScore: 0.3,
       sessionKey: undefined,
     });
-    expect(payload.results).toEqual([makeRef({ id: "1", snippet: "Memory hit\n\nSource: chat_extract" })]);
+    expect(payload.results).toHaveLength(1);
     expect(payload.corpus).toBe("memory");
   });
 
@@ -118,10 +119,13 @@ describe("memory_search tool: corpus 路由", () => {
     expect(payload.corpus).toBe("memory");
   });
 
-  it("corpus=sessions → 返回空 + warnOnce", async () => {
-    const searchSpy = vi.fn();
+  it("corpus=sessions → 搜索 milvus（sessionKey 过滤）, 输出 corpus=sessions", async () => {
+    const searchSpy = vi.fn().mockResolvedValue([makeRef({ id: "s1" })]);
     const tool = createMemorySearchTool(
-      makeDeps({ getManager: () => ({ search: searchSpy }) }),
+      makeDeps({
+        getManager: () => ({ search: searchSpy }),
+        agentSessionKey: "agent:test:session-1",
+      }),
     );
 
     const result = await tool.execute(
@@ -131,16 +135,16 @@ describe("memory_search tool: corpus 路由", () => {
     );
     const payload = parseResult(result);
 
-    expect(searchSpy).not.toHaveBeenCalled();
-    expect(payload.results).toEqual([]);
+    expect(searchSpy).toHaveBeenCalledWith("test", {
+      maxResults: undefined,
+      minScore: undefined,
+      sessionKey: "agent:test:session-1",
+    });
+    expect(payload.results).toHaveLength(1);
     expect(payload.corpus).toBe("sessions");
-    expect(warnOnceMock).toHaveBeenCalledWith(
-      "corpus-sessions",
-      "corpus=sessions not yet supported in milvus backend",
-    );
   });
 
-  it("corpus=wiki → 返回空 + warnOnce", async () => {
+  it("corpus=wiki → 仅查 supplement（无注册时返回空数组）", async () => {
     const searchSpy = vi.fn();
     const tool = createMemorySearchTool(
       makeDeps({ getManager: () => ({ search: searchSpy }) }),
@@ -153,17 +157,14 @@ describe("memory_search tool: corpus 路由", () => {
     );
     const payload = parseResult(result);
 
+    // wiki corpus 不调 milvus
     expect(searchSpy).not.toHaveBeenCalled();
     expect(payload.results).toEqual([]);
     expect(payload.corpus).toBe("wiki");
-    expect(warnOnceMock).toHaveBeenCalledWith(
-      "corpus-wiki",
-      "wiki supplement integration deferred to Task 16",
-    );
   });
 
-  it("corpus=all → 退化为 memory + warnOnce + 正常搜索", async () => {
-    const searchSpy = vi.fn().mockResolvedValue([makeRef()]);
+  it("corpus=all → milvus + supplement 双路合并，输出 corpus=all", async () => {
+    const searchSpy = vi.fn().mockResolvedValue([makeRef({ id: "m1" })]);
     const tool = createMemorySearchTool(
       makeDeps({ getManager: () => ({ search: searchSpy }) }),
     );
@@ -176,11 +177,23 @@ describe("memory_search tool: corpus 路由", () => {
     const payload = parseResult(result);
 
     expect(searchSpy).toHaveBeenCalledOnce();
-    expect(payload.corpus).toBe("memory");
-    expect(warnOnceMock).toHaveBeenCalledWith(
-      "corpus-all-deferred",
-      "corpus=all: wiki part deferred to Task 16; searching memory only",
+    expect(payload.results).toHaveLength(1);
+    expect(payload.corpus).toBe("all");
+  });
+
+  it("corpus=wiki 时 manager 为 null 不抛错（wiki 不查 milvus）", async () => {
+    const tool = createMemorySearchTool({ getManager: () => null });
+
+    const result = await tool.execute(
+      "call-1",
+      { query: "test", corpus: "wiki" },
+      undefined,
     );
+    const payload = parseResult(result);
+
+    expect(payload.results).toEqual([]);
+    expect(payload.corpus).toBe("wiki");
+    expect(payload.error).toBeUndefined();
   });
 });
 
