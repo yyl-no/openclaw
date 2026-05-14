@@ -254,5 +254,23 @@ export default definePluginEntry({
     api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), {
       names: ["memory_get"],
     });
+
+    // CLI: memory migrate <dir> [--reverse] [--dry-run]
+    api.registerCli(
+      async ({ program, config }) => {
+        const { registerMigrationCli } = await import("./src/migrate.js");
+        registerMigrationCli(program, config);
+      },
+      {
+        parentPath: ["memory"],
+        descriptors: [
+          {
+            name: "migrate",
+            description: "Migrate memory files between Markdown and Milvus",
+            hasSubcommands: false,
+          },
+        ],
+      },
+    );
   },
 });

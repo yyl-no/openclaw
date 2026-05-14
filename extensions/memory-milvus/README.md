@@ -15,6 +15,29 @@ Milvus-backed memory plugin providing vector ANN search for OpenClaw memory.
 | Dreaming promotion `rankPromotionCandidates` + `applyPromotions` | ✅ |
 | Source label / memory type validation | ✅ |
 | AI flush turn prompt integration | ✅ |
+| `memory migrate` CLI (Markdown ↔ Milvus bidirectional) | ✅ |
+
+## Migration
+
+The plugin includes a bidirectional migration CLI subcommand under `openclaw memory`.
+
+```bash
+# Forward: scan MEMORY.md + memory/*.md → chunk → embed → Milvus
+openclaw memory migrate ./my-memory-dir
+
+# Reverse: query Milvus → export to memory-export/<timestamp>/
+openclaw memory migrate ./my-memory-dir --reverse
+
+# Dry-run: preview without writing
+openclaw memory migrate ./my-memory-dir --dry-run
+
+# Reverse with type filter
+openclaw memory migrate ./my-memory-dir --reverse --type=short_term
+```
+
+**Dedup**: SHA-256 in-batch dedup by `text + provenance_label`; cross-batch dedup via
+Milvus `provenance_label` query. Reverse output goes to `memory-export/<timestamp>/`
+(human-friendly) and never overwrites the original `memory/*.md`.
 
 ## Not yet available
 
@@ -90,4 +113,5 @@ AI flush turn
 - [Task 10 plan](../../refactor/1-plan.md)
 - [Task 10 decisions](../../refactor/2-decisions.md)
 - [Task 13](#) — Dreaming promotion (completed)
+- [Task 14](#) — Markdown ↔ Milvus migration tool (completed)
 - [Task 16](#) — Dedup / citation / multi-corpus

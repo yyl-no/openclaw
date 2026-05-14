@@ -8,6 +8,7 @@ describe("memory-milvus plugin register", () => {
     const mockApi = {
       registerMemoryCapability: vi.fn(),
       registerTool: registerToolSpy,
+      registerCli: vi.fn(),
     } as unknown as OpenClawPluginApi;
 
     pluginEntry.register(mockApi);
@@ -41,6 +42,7 @@ describe("memory-milvus plugin register", () => {
     const mockApi = {
       registerMemoryCapability: capabilitySpy,
       registerTool: vi.fn(),
+      registerCli: vi.fn(),
     } as unknown as OpenClawPluginApi;
 
     pluginEntry.register(mockApi);

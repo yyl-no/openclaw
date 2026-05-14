@@ -698,7 +698,7 @@ export class MilvusSearchManager {
       recallCount: entry.recallCount ?? 0,
       createdAt: entry.createdAt ?? new Date().toISOString(),
       updatedAt: entry.updatedAt ?? new Date().toISOString(),
-      provenance: { kind: "milvus", label },
+      provenance: { kind: entry.provenance?.kind ?? "milvus", label },
     };
 
     // degraded 或健康探测失败 → 直接 fallback
@@ -760,7 +760,7 @@ export class MilvusSearchManager {
       snippet: entry.snippet ?? entry.text.slice(0, 200),
       score: 0,
       provenance: {
-        kind: "milvus",
+        kind: entry.provenance?.kind ?? "milvus",
         label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
       },
     };
@@ -795,7 +795,7 @@ export class MilvusSearchManager {
       snippet: entry.snippet ?? entry.text.slice(0, 200),
       score: 0,
       provenance: {
-        kind: "milvus",
+        kind: entry.provenance?.kind ?? "milvus",
         label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
       },
     };

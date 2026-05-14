@@ -575,7 +575,7 @@
 | live 测试真实回归 | `OpenClawConfig` 为 `{} as any` 占位 | Task 13 |
 | pi-tools 白名单架构下沉 | 当前硬编码，未来多后端时评估 | Task 16+ |
 | `session_key` 默认值 | write() 中 TODO：Host 注入默认 sessionKey | Task 16 |
-| BM25 全文本搜索 | Task 14 | memory-milvus |
+| BM25 全文本搜索 | Task 16 | memory-milvus |
 | sha256 去重 / update / delete / 版本 | Task 16 | memory-milvus |
 
 ---
@@ -759,3 +759,46 @@
 - 9 维高级召回信号（dailyCount / groundedCount / totalScore / maxScore / queryHashes 等）
 - 去重（sha256）、软删除、版本、citation 装饰
 - 多 corpus 全量支持（sessions / wiki）
+
+---
+
+### Task 14: Markdown ↔ Milvus 双向迁移工具 ✅ 完成
+
+**完成日期**：2026-05-13
+
+**依据**：`1-plan.md` §Task14 + `2-decisions.md` §12.3/§8.1/§15
+
+**工程动作**：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | 实现 chunkMarkdown / scanMemoryFiles / dedupKey / migrateMarkdownToMilvus / migrateMilvusToMarkdown | `migrate.ts`（新建，~630行） |
+| 2 | 实现 registerMigrationCli（注册 `memory migrate <dir> [--reverse] [--dry-run]` 子命令） | `migrate.ts` |
+| 3 | CLI 注册到 index.ts 通过 `api.registerCli({ parentPath: ["memory"] })` | `index.ts` |
+| 4 | 修复 provenance.kind 从硬编码 `"milvus"` 改为 `entry.provenance?.kind ?? "milvus"`（3处） | `search.ts` |
+| 5 | 10 个迁移单测（scan/find/dry-run/forward/dedup/cross-batch/failure/reverse） | `migrate.test.ts`（新建，~290行） |
+| 6 | 修复 register.test.ts mock 增加 `registerCli` | `register.test.ts`（+2行） |
+| 7 | README 增加 Migration 小节（命令示例 + 去重说明 + reverse 输出路径约定） | `README.md` |
+
+**功能摘要**：
+- **正向（Markdown → Milvus）**：递归扫描 `MEMORY.md` + `memory/YYYY-MM-DD.md`，按 `##`/`###` 标题切分（≥20字符），text-embedding-v3 嵌入，`provenance.kind="file"` + `provenance_label=memory_source_label.IMPORT`
+- **反向（Milvus → Markdown）**：分页查询全量 → 按 `memory_type` + 日期分组 → 导出到 `memory-export/<timestamp>/`（不覆盖原文件），支持 `--type` 过滤
+- **去重**：in-batch SHA-256（`text + "\0" + provenance_label`）+ cross-batch Milvus `provenance_label` 查询
+- **dry-run**：仅输出计划不写入
+- **CLI**：注册为 `openclaw memory migrate <dir>`，通过 `parentPath: ["memory"]` 挂载到现有 `memory` 命令
+
+**测试矩阵**：
+
+| 测试文件 | 测试数 | 覆盖 |
+|----------|--------|------|
+| `register.test.ts` | 2 | registerCli mock 修复 |
+| `migrate.test.ts` | 10 | scan/find/dry-run/forward/dedup/cross-batch/失败/reverse/type-filter/empty |
+| 全量（9 files） | **132** | 全绿 |
+
+**验收证据**：
+- `pnpm test extensions/memory-milvus` → 9 files, **132 tests** passed
+- `pnpm tsgo:extensions` → memory-milvus **0 错误**（11 预存 error 均在 memory-core）
+- `pnpm build` → 全绿
+
+**遗留移交 Task 16**：
+- `content_hash` schema 字段化 + SDK 去重能力抽取 + 存量数据迁移到 schema 字段去重

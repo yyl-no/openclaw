@@ -426,13 +426,33 @@ type MemoryFlushPlan = {
 - **完工条件 = Alpha 退出全步**：撤下 `package.json` 的 `"stability": "experimental"` + 移除 README 的 “Alpha status” 标注 + live 端到端回归全绿（详见 decisions §12.7/§12.12）
 - 详见 decisions §5 / §13.2 / §12.12
 
-### Task 14: Markdown → Milvus 迁移工具（延后）
+### Task 14: Markdown ⊓ Milvus 双向迁移工具 ✅ 完成
 
-- 插件主体建好后再实现
+> **状态**：✅ 完成于 2026-05-13
 
-- 读取 `MEMORY.md` + `memory/YYYY-MM-DD.md`
-- 切分 → embed → insert，provenance_label 保留原始路径
-- 支持反向导出：Milvus → Markdown
+- **依赖**：Task 13 完工后启动（插件主体已退出 Alpha）
+- **CLI 形态**（Q1α）：独立子命令 `openclaw memory migrate <dir> [--reverse] [--dry-run]`，注册到 memory-milvus 插件的 CLI 钩子（与 `memory_write` 同插件）；不走插件启动自动 bootstrap
+- **正向（Markdown → Milvus）**：
+  - 输入：`<dir>/MEMORY.md` + `<dir>/memory/YYYY-MM-DD.md` 递归扫描
+  - 切分：沿用 memory-core 现有 chunk 边界（复用 `dreaming-phases` 的 chunker），不重新设计
+  - embed：走现有 `EmbeddingProvider`（text-embedding-v3 / 1024 维）
+  - 写入：`MilvusSearchManager.write()`，`provenance.kind="file"` + `provenance.label` 保留原始 `memory/YYYY-MM-DD.md:Lstart-Lend`；`memory_type="short_term"`；`provenance source label=IMPORT`（复用 `MEMORY_SOURCE_LABELS.IMPORT` 枚举，详见 §12.3）
+  - 失败：复用 §10.4 ndjson fallback，批量任务结束后输出失败报告
+- **反向（Milvus → Markdown）**：
+  - `--reverse` 模式：query 全量（分页）→ 按 `memory_type` 分类 → 写到独立输出目录 `memory-export/<timestamp>/MEMORY.md` + `memory-export/<timestamp>/memory/YYYY-MM-DD.md`（**不覆盖**原 `memory/*.md`）
+  - 范围：默认全量（含 archived），`--type=short_term|long_term|archived` 可过滤
+- **去重**（Q2α、轻量临时实现）：
+  - 写入前计算 `sha256(text + provenance_label)` 作为纯内存发现去重键，同一 batch 内重复跳过
+  - 跨 batch（重跑迁移）：靠 `provenance_label` 唯一性 — 写入前 `client.query(filter='provenance_label == "..."')` 检查，存在则 skip + 计数
+  - 本任务**不动 schema**（不新增 `content_hash` 字段），sha256 仅用于运行期内存去重；Task 16 推 schema 字段 + SDK 标准能力时收敛（并迁移存量数据）
+- **进度 / dry-run**：`--dry-run` 仅输出计划不写入；实际运行输出 `[N/total] file=... action=insert|skip|fail` 并返回全局计数（插入 / 跳过重复 / 失败）
+- **测试**：
+  - 单测：mock client + EmbeddingProvider，验证 chunk 走口 / sha256 去重 / `--reverse` 输出目录结构 / dry-run 不调 client.insert / fallback 触发
+  - 集成：临时 fixtures 目录含 2 个 `memory/YYYY-MM-DD.md` + 1 个 `MEMORY.md`，跑全流程验证改变量
+  - live：`OPENCLAW_LIVE_TEST=1` 下跑一次 forward + reverse 往返，验证 reverse 输出可被 forward 重新导入（sha256 去重生效，跳过计数 == 原条数）
+- **文档**：`extensions/memory-milvus/README.md` 增 “Migration” 小节（命令示例 + 去重说明 + reverse 输出路径约定）
+- **遗留移交 Task 16**：`content_hash` schema 字段化 + SDK 去重能力抽取 + 存量数据迁移到 schema字段去重
+- 详见 decisions §12.3（`MEMORY_SOURCE_LABELS.IMPORT`） / §10.4（fallback） / §8.1 + §15（BM25 归 Task 16，与本任务无关）
 
 ### Task 15: 接入 memory slot
 
