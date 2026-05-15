@@ -4,6 +4,7 @@
     "onStartup": false
   },
   "kind": "memory",
+  "commandAliases": [{ "name": "memory-migrate" }],
   "contracts": {
     "tools": ["memory_write", "memory_get", "memory_search"]
   },

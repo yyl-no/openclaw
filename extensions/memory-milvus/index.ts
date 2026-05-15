@@ -256,17 +256,17 @@ export default definePluginEntry({
       names: ["memory_get"],
     });
 
-    // CLI: memory migrate <dir> [--reverse] [--dry-run]
+    // CLI: memory-migrate <dir> [--reverse] [--dry-run]
+    // 独立命令注册（无 parentPath），不依赖 memory-core CLI 根命令
     api.registerCli(
       async ({ program, config }) => {
         const { registerMigrationCli } = await import("./src/migrate.js");
         registerMigrationCli(program, config);
       },
       {
-        parentPath: ["memory"],
         descriptors: [
           {
-            name: "migrate",
+            name: "memory-migrate",
             description: "Migrate memory files between Markdown and Milvus",
             hasSubcommands: false,
           },

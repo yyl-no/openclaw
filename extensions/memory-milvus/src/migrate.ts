@@ -3,7 +3,7 @@
  *
  * 依据：1-plan.md §Task14 + 2-decisions.md §12.3/§10.4
  *
- * CLI 形态：`openclaw memory migrate <dir> [--reverse] [--dry-run]`
+ * CLI 形态：`openclaw memory-migrate <dir> [--reverse] [--dry-run]`
  * 注册到 memory-milvus 插件的 CLI 钩子，与 memory_write 同插件。
  */
 
@@ -495,15 +495,15 @@ export async function migrateMilvusToMarkdown(
 /**
  * 在 commander program 上注册 `migrate <dir>` 子命令。
  *
- * 由 index.ts 中 `api.registerCli(registrar, { parentPath: ["memory"] })` 调用，
- * `program` 实参为已解析的 "memory" 父命令。
+ * 由 index.ts 中 `api.registerCli()` 独立注册（无 parentPath）。
+ * `program` 实参为根 commander 实例。
  */
 export function registerMigrationCli(
   program: Command,
   cfg: OpenClawConfig,
 ): void {
   program
-    .command("migrate <dir>")
+    .command("memory-migrate <dir>")
     .description("Migrate memory files between Markdown and Milvus")
     .option("--reverse", "Export from Milvus back to Markdown")
     .option("--dry-run", "Preview the migration without writing any data")
