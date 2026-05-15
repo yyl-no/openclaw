@@ -10,7 +10,7 @@ import {
   type MemoryType,
 } from "./types.js";
 
-// ── MEMORY_SOURCE_LABELS 常量值校验 ───────────────────────────────
+// ── MEMORY_SOURCE_LABELS constant value check ─────────────────────
 
 describe("MEMORY_SOURCE_LABELS", () => {
   it("contains exactly four entries", () => {
@@ -40,7 +40,7 @@ describe("MEMORY_SOURCE_LABELS", () => {
   });
 });
 
-// ── MEMORY_TYPES 常量值校验 ──────────────────────────────────────
+// ── MEMORY_TYPES constant value check ────────────────────────────
 
 describe("MEMORY_TYPES", () => {
   it("contains exactly three entries", () => {
@@ -162,7 +162,7 @@ describe("assertValidMemoryType", () => {
   });
 });
 
-// ── MilvusMemoryEntryMetadata 类型兼容性 ───────────────────────────
+// ── MilvusMemoryEntryMetadata type compatibility ─────────────────
 
 describe("MilvusMemoryEntryMetadata", () => {
   it("accepts a minimal valid metadata object", () => {

@@ -1,10 +1,8 @@
 /**
- * memory-milvus 插件入口
+ * memory-milvus plugin entry.
  *
- * 依据：1-plan.md §Task8-9 + 2-decisions.md §6-9
- *
- * 与 memory-core 同构注册 MemoryPluginCapability，
- * 上层仅通过 plugins.slots.memory 切换即可完成互斥替换。
+ * Registers a MemoryPluginCapability isomorphic with memory-core.
+ * Switching backends is a single config change: plugins.slots.memory.
  */
 
 import {
@@ -23,8 +21,8 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 import { createRequire } from "module";
 const _require = createRequire(import.meta.url);
-// 运行时从 openclaw npm 包的 dist 目录加载 bundled memory-core-bundled-runtime。
-// 路径随安装位置和构建哈希变化，部署时需替换为实际 dist 路径。
+// Runtime: load bundled memory-core-bundled-runtime from the openclaw npm package dist.
+// Path varies by install location and build hash — replace with the actual dist path on deploy.
 const _bundled = _require("/home/yl/.npm-global/lib/node_modules/openclaw/dist/memory-core-bundled-runtime-BcwkfmWM.js");
 const registerBuiltInMemoryEmbeddingProviders = _bundled.r ?? _bundled.registerBuiltInMemoryEmbeddingProviders;
 import { DEFAULT_COLLECTION_NAME } from "./src/schema.js";
@@ -45,8 +43,7 @@ import {
 // ── Prompt Builder ─────────────────────────────────────────────────
 
 /**
- * 构建系统提示词中的记忆说明区段。
- * 告知 AI 使用 memory_search / memory_get 工具，Milvus 后端使用数字 id。
+ * Build the system prompt section describing Milvus memory tools.
  */
 function buildPromptSection(params: {
   availableTools: Set<string>;
@@ -155,7 +152,7 @@ async function createEmbeddingProvider(
 
 // ── Runtime ────────────────────────────────────────────────────────
 
-/** 持有活跃的 search manager 实例，用于 closeAllMemorySearchManagers */
+/** Hold the active search manager reference for closeAllMemorySearchManagers. */
 let activeManager: MilvusSearchManager | null = null;
 
 const milvusRuntime: MemoryPluginRuntime = {
@@ -165,7 +162,7 @@ const milvusRuntime: MemoryPluginRuntime = {
     let degraded = false;
 
     try {
-      // 读取插件配置
+      // Read plugin config
       const rawConfig = readPluginConfig(cfg);
       if (!rawConfig) {
         return {
@@ -177,17 +174,17 @@ const milvusRuntime: MemoryPluginRuntime = {
 
       const searchCfg = parseMilvusConfig(rawConfig);
 
-      // 创建 Milvus 客户端
+      // Create Milvus client
       const client = createMilvusClient(searchCfg.host, searchCfg.port);
 
-      // Eager init: 确保 Collection 就绪
+      // Eager init: ensure the collection is ready
       try {
         await ensureCollectionReady(client, {
           collectionName: searchCfg.collectionName,
           embeddingDim: searchCfg.embedding.dimensions ?? 1024,
         });
       } catch (bootstrapErr) {
-        // 连不上 / collection 创建失败 → warn + degraded，不阻止插件启用
+        // Unreachable / collection create failed → warn + degraded, do not block plugin init
         console.warn(
           "[memory-milvus] Collection bootstrap failed, operating in degraded mode:",
           (bootstrapErr as Error).message ?? bootstrapErr,
@@ -195,7 +192,7 @@ const milvusRuntime: MemoryPluginRuntime = {
         degraded = true;
       }
 
-      // 创建 Embedding Provider
+      // Create embedding provider
       const provider = await createEmbeddingProvider(
         cfg,
         agentId,
@@ -204,7 +201,7 @@ const milvusRuntime: MemoryPluginRuntime = {
         searchCfg.embedding.dimensions,
       );
 
-      // 创建搜索管理器
+      // Create search manager
       const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
       const manager = new MilvusSearchManager(
         client,
@@ -216,7 +213,7 @@ const milvusRuntime: MemoryPluginRuntime = {
         { degraded },
       );
 
-      // 持有引用用于后续关闭
+      // Hold reference for later close
       activeManager = manager;
 
       return { manager };
@@ -244,8 +241,9 @@ export default definePluginEntry({
   description: "Milvus-backed memory search tools with vector ANN + BM25 hybrid search",
   kind: "memory",
   register(api: OpenClawPluginApi) {
-    // 自行注册内置 embedding provider（local/openai 等），
-    // 避免依赖 memory-core 插件的加载顺序（slot 指向 memory-milvus 时 memory-core 不会被加载）。
+    // Self-register built-in embedding providers (auto/local/openai etc.).
+    // This avoids depending on memory-core load order — when the memory slot
+    // points to memory-milvus, memory-core is not loaded.
     registerBuiltInMemoryEmbeddingProviders(api);
 
     api.registerMemoryCapability({
@@ -255,24 +253,26 @@ export default definePluginEntry({
       writeToolNames: ["memory_write"],
     });
 
-    // memory_write 工具：AI flush turn 调此写入，内部走 Manager.write()
+    // memory_write tool: called by AI flush turn, delegates to manager.write()
     api.registerTool(() => createMemoryWriteTool({ getManager: () => activeManager }), {
       names: ["memory_write"],
     });
 
-    // memory_search 工具：Milvus ANN + BM25 混合检索
+    // memory_search tool: Milvus ANN + BM25 hybrid search
     api.registerTool(() => createMemorySearchTool({ getManager: () => activeManager }), {
       names: ["memory_search"],
     });
 
-    // memory_get 工具：按 id 查询 PK → MemoryEntry
+    // memory_get tool: PK lookup → MemoryEntry
     api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), {
       names: ["memory_get"],
     });
 
-    // Dreaming 调度编排 — lazy-init factory：当 activeManager 为 null/degraded
-    // 时通过 milvusRuntime.getMemorySearchManager() 按需创建，解决 cron isolated
-    // session 中 activeManager 尚未初始化导致 dreaming sweep 失败的问题。
+    // Dreaming orchestration — lazy-init factory resolver.
+    // When activeManager is null or degraded, creates one via
+    // milvusRuntime.getMemorySearchManager() on demand. This
+    // avoids cron-isolated sessions failing because activeManager
+    // was not initialized.
     setDreamingManagerResolver(async (cfg: OpenClawConfig, agentId: string) => {
       if (activeManager && !activeManager.degraded) return activeManager;
       const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
@@ -286,7 +286,7 @@ export default definePluginEntry({
     registerShortTermPromotionDreaming(api);
 
     // CLI: memory-migrate <dir> [--reverse] [--dry-run]
-    // 独立命令注册（无 parentPath），不依赖 memory-core CLI 根命令
+    // Standalone command registration (no parentPath), independent of memory-core CLI
     api.registerCli(
       async ({ program, config }) => {
         const { registerMigrationCli } = await import("./src/migrate.js");

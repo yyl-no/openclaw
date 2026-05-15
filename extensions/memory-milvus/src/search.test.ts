@@ -96,8 +96,8 @@ beforeEach(() => {
 
 // ── Path 1: Successful write ─────────────────────────────────────
 
-describe("MilvusSearchManager.write: 成功路径", () => {
-  it("健康 → replay fallback → embed → insert → 返回 MemoryReference", async () => {
+describe("MilvusSearchManager.write: success path", () => {
+  it("healthy → replay fallback → embed → insert → returns MemoryReference", async () => {
     const client = makeClient();
     const provider = {
       id: "test-provider",
@@ -118,25 +118,25 @@ describe("MilvusSearchManager.write: 成功路径", () => {
     const entry = makeEntry({ text: "Test memory" });
     const ref = await manager.write(entry);
 
-    // 健康探测调用了
+    // health check called
     expect(client.describeCollection).toHaveBeenCalledOnce();
-    // 回放了 fallback
+    // fallback replayed
     expect(replayFallbackMock).toHaveBeenCalledOnce();
-    // embed 被调用
+    // embed called
     expect(provider.embedQuery).toHaveBeenCalledWith("Test memory");
-    // insert 被调用
+    // insert called
     expect(client.insert).toHaveBeenCalledOnce();
-    // 返回正确 id
+    // correct id returned
     expect(ref.id).toBe("42");
     expect(ref.provenance.kind).toBe("milvus");
     expect(ref.provenance.label).toBe("chat_extract");
   });
 });
 
-// ── Path 2: Embed 失败 → fallback ────────────────────────────────
+// ── Path 2: Embed failure → fallback ────────────────────────────
 
-describe("MilvusSearchManager.write: embed 失败", () => {
-  it("embed 抛错后走 fallback 并返回 fallback id", async () => {
+describe("MilvusSearchManager.write: embed failure", () => {
+  it("embed throws → fallback, returns fallback id", async () => {
     const client = makeClient();
     const provider = {
       id: "test-provider",
@@ -157,23 +157,23 @@ describe("MilvusSearchManager.write: embed 失败", () => {
     const entry = makeEntry({ text: "Memory that fails" });
     const ref = await manager.write(entry);
 
-    // 健康探测通过了
+    // health check passed
     expect(client.describeCollection).toHaveBeenCalledOnce();
-    // embed 被调用
+    // embed called
     expect(provider.embedQuery).toHaveBeenCalledWith("Memory that fails");
-    // insert 未被调用（embed 就失败了）
+    // insert not called (embed already failed)
     expect(client.insert).not.toHaveBeenCalled();
-    // fallback 写入被调用
+    // fallback write called
     expect(writeFallbackMock).toHaveBeenCalledOnce();
-    // 返回 fallback id
+    // returns fallback id
     expect(ref.id).toMatch(/^fallback:\d+$/);
   });
 });
 
-// ── Path 3: Insert 失败 → fallback ───────────────────────────────
+// ── Path 3: Insert failure → fallback ────────────────────────────
 
-describe("MilvusSearchManager.write: insert 失败", () => {
-  it("embed 成功但 insert 抛错后走 fallback", async () => {
+describe("MilvusSearchManager.write: insert failure", () => {
+  it("embed succeeds but insert throws, falls back", async () => {
     const client = makeClient({
       insert: (() => {
         const fn = vi.fn<() => Promise<never>>();
@@ -198,16 +198,16 @@ describe("MilvusSearchManager.write: insert 失败", () => {
     expect(client.describeCollection).toHaveBeenCalledOnce();
     expect(provider.embedQuery).toHaveBeenCalledOnce();
     expect(client.insert).toHaveBeenCalledOnce();
-    // fallback 兜底
+    // fallback safety net
     expect(writeFallbackMock).toHaveBeenCalledOnce();
     expect(ref.id).toMatch(/^fallback:\d+$/);
   });
 });
 
-// ── Path 4: Degraded 直 fallback ─────────────────────────────────
+// ── Path 4: Degraded → direct fallback ───────────────────────────
 
-describe("MilvusSearchManager.write: degraded 直 fallback", () => {
-  it("degraded=true 时跳过健康探测，直接 fallback", async () => {
+describe("MilvusSearchManager.write: degraded direct fallback", () => {
+  it("skips health check when degraded=true, goes straight to fallback", async () => {
     const client = makeClient();
     const provider = makeProvider();
 
@@ -224,22 +224,22 @@ describe("MilvusSearchManager.write: degraded 直 fallback", () => {
     const entry = makeEntry({ text: "Degraded write" });
     const ref = await manager.write(entry);
 
-    // 不调健康探测
+    // no health check
     expect(client.describeCollection).not.toHaveBeenCalled();
-    // 不调 embed
+    // no embed
     expect(provider.embedQuery).not.toHaveBeenCalled();
-    // 不调 insert
+    // no insert
     expect(client.insert).not.toHaveBeenCalled();
-    // 直接 fallback
+    // straight to fallback
     expect(writeFallbackMock).toHaveBeenCalledOnce();
     expect(ref.id).toMatch(/^fallback:\d+$/);
   });
 });
 
-// ── Path 5: 健康探测失败 → fallback ──────────────────────────────
+// ── Path 5: Health check failure → fallback ──────────────────────
 
-describe("MilvusSearchManager.write: 健康探测失败", () => {
-  it("非 degraded 但 healthCheck 失败 → fallback", async () => {
+describe("MilvusSearchManager.write: health check failure", () => {
+  it("not degraded but healthCheck fails → fallback", async () => {
     const client = makeClient({
       describeCollection: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")),
     });
@@ -257,17 +257,17 @@ describe("MilvusSearchManager.write: 健康探测失败", () => {
     const entry = makeEntry({ text: "Offline write" });
     const ref = await manager.write(entry);
 
-    // 健康探测被调用
+    // health check was called
     expect(client.describeCollection).toHaveBeenCalledOnce();
-    // 但不调 embed
+    // but no embed
     expect(provider.embedQuery).not.toHaveBeenCalled();
-    // fallback 写入
+    // fallback write
     expect(writeFallbackMock).toHaveBeenCalledOnce();
     expect(ref.id).toMatch(/^fallback:\d+$/);
   });
 });
 
-// ── recordRecall 正式实现 ────────────────────────────────────
+// ── recordRecall ─────────────────────────────────────────────
 
 describe("MilvusSearchManager.recordRecall", () => {
   const makeRefs = (ids: string[]): MemoryReference[] =>
@@ -293,7 +293,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     last_recalled_at: "",
   });
 
-  it("空 refs → 不调 client，直接返回", async () => {
+  it("empty refs → skip client, return immediately", async () => {
     const client = makeClient();
     const manager = createManager({ client });
 
@@ -314,7 +314,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     ).rejects.toThrow("MilvusSearchManager is closed");
   });
 
-  it("degraded → warnOnce 后 return，不调 client", async () => {
+  it("degraded → warnOnce then return, skip client", async () => {
     const client = makeClient();
     const manager = new MilvusSearchManager(
       client,
@@ -332,7 +332,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     expect(client.upsert).not.toHaveBeenCalled();
   });
 
-  it("正常路径：命中累加 recall_count + last_recalled_at", async () => {
+  it("happy path: accumulated recall_count + last_recalled_at", async () => {
     const querySpy = vi.fn().mockResolvedValue({
       data: [makeQueryRow("1", 2), makeQueryRow("2", 0)],
     });
@@ -349,7 +349,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     await manager.recordRecall(makeRefs(["1", "2"]));
     const after = Date.now();
 
-    // 第一步：query 当前字段
+    // Step 1: query current fields
     expect(querySpy).toHaveBeenCalledOnce();
     expect(querySpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -359,32 +359,32 @@ describe("MilvusSearchManager.recordRecall", () => {
       }),
     );
 
-    // 第二步：upsert 累加后的值
+    // Step 2: upsert accumulated values
     expect(upsertSpy).toHaveBeenCalledOnce();
     const upsertArg = upsertSpy.mock.calls[0][0];
     expect(upsertArg.collection_name).toBe("test_collection");
     const rows = upsertArg.data as Record<string, unknown>[];
     expect(rows).toHaveLength(2);
 
-    // id=1 原有 recall_count=2 → 3
+    // id=1 had recall_count=2 → 3
     const row1 = rows.find((r) => r.id === "1")!;
     expect(row1.recall_count).toBe(3);
     const t1 = row1.last_recalled_at as string;
     expect(new Date(t1).getTime()).toBeGreaterThanOrEqual(before);
     expect(new Date(t1).getTime()).toBeLessThanOrEqual(after);
-    expect(row1.text).toBe("text-1"); // 保留原字段
+    expect(row1.text).toBe("text-1"); // preserve original fields
     expect(row1.created_at).toBe("2025-01-01T00:00:00.000Z");
 
-    // id=2 原有 recall_count=0 → 1
+    // id=2 had recall_count=0 → 1
     const row2 = rows.find((r) => r.id === "2")!;
     expect(row2.recall_count).toBe(1);
     const t2 = row2.last_recalled_at as string;
     expect(new Date(t2).getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it("refs 中存在不存在于 milvus 的 id 时仍正常累加（prevCount=0）", async () => {
+  it("refs with ids not in milvus still accumulate normally (prevCount=0)", async () => {
     const querySpy = vi.fn().mockResolvedValue({
-      data: [makeQueryRow("1", 5)], // 只有 id=1 在 db 中
+      data: [makeQueryRow("1", 5)], // only id=1 is in db
     });
     const upsertSpy = vi.fn().mockResolvedValue({});
 
@@ -398,13 +398,13 @@ describe("MilvusSearchManager.recordRecall", () => {
 
     // id=1: 5+1=6
     expect(rows.find((r) => r.id === "1")!.recall_count).toBe(6);
-    // missing-id: 0+1=1，且不保留原字段（无 existing）
+    // missing-id: 0+1=1, no original fields (no existing row)
     const missing = rows.find((r) => r.id === "missing-id")!;
     expect(missing.recall_count).toBe(1);
     expect(missing.text).toBeUndefined();
   });
 
-  it("upsert 失败 → warnOnce 不抛", async () => {
+  it("upsert failure → warnOnce, does not throw", async () => {
     const querySpy = vi.fn().mockResolvedValue({
       data: [makeQueryRow("1", 1)],
     });
@@ -417,12 +417,12 @@ describe("MilvusSearchManager.recordRecall", () => {
       manager.recordRecall(makeRefs(["1"])),
     ).resolves.toBeUndefined();
 
-    // query 仍被调用
+    // query was still called
     expect(querySpy).toHaveBeenCalledOnce();
-    // upsert 失败不抛
+    // upsert failure does not throw
   });
 
-  it("query 失败 → warnOnce 不抛（整体链路容错）", async () => {
+  it("query failure → warnOnce, does not throw (whole chain fault-tolerant)", async () => {
     const querySpy = vi.fn().mockRejectedValue(new Error("connection lost"));
     const upsertSpy = vi.fn();
 
@@ -437,10 +437,10 @@ describe("MilvusSearchManager.recordRecall", () => {
   });
 });
 
-// ── search degraded 降级 ───────────────────────────────────────
+// ── search degraded ──────────────────────────────────────────
 
-describe("MilvusSearchManager.search: degraded 降级", () => {
-  it("degraded=true 时 search 返回 []，不调 client", async () => {
+describe("MilvusSearchManager.search: degraded", () => {
+  it("search returns [] when degraded=true, skip client", async () => {
     const client = makeClient();
     const provider = makeProvider();
     const manager = new MilvusSearchManager(
@@ -458,10 +458,10 @@ describe("MilvusSearchManager.search: degraded 降级", () => {
   });
 });
 
-// ── get(id) 四态 ──────────────────────────────────────────────
+// ── get(id) four states ──────────────────────────────────────
 
 describe("MilvusSearchManager.get", () => {
-  it("found → 返回 MemoryEntry", async () => {
+  it("found → returns MemoryEntry", async () => {
     const row = {
       id: "42",
       text: "Hello world",
@@ -543,9 +543,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
     expect(results).toHaveLength(2);
     expect(results[0]!.id).toBe("1");
     expect(results[0]!.score).toBe(1); // neutral score
-    // 不应调用 embed / vector search
+    // should not call embed / vector search
     expect(client.search).not.toHaveBeenCalled();
-    // 调了 queryByFilter
+    // called queryByFilter
     expect(querySpy).toHaveBeenCalledOnce();
     const callArg = querySpy.mock.calls[0]?.[0];
     expect(callArg).toBeDefined();
@@ -605,7 +605,7 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 
     await manager.search("test query", { memoryType: "short_term" });
 
-    // vector search 收到合并后的 filter
+    // vector search received the combined filter
     expect(searchSpy).toHaveBeenCalledOnce();
     expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type == "short_term"');
   });
@@ -677,12 +677,12 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
-  it("正常排名：按 recall_count + recency 打分", async () => {
+  it("normal ranking: scored by recall_count + recency", async () => {
     const rows = [
-      makeQueryRow("1", 20, RECENT_ISO, RECENT_ISO),   // 高召回 + 最近 → 高分
-      makeQueryRow("2", 5, RECENT_ISO, RECENT_ISO),     // 中召回 + 最近 → 中分
-      makeQueryRow("3", 20, OLD_ISO, OLD_ISO),           // 高召回 + 旧 → 衰减
-      makeQueryRow("4", 0, RECENT_ISO),                   // 0 recall → 被 minRecallCount 过滤
+      makeQueryRow("1", 20, RECENT_ISO, RECENT_ISO),   // high recall + recent → high score
+      makeQueryRow("2", 5, RECENT_ISO, RECENT_ISO),     // medium recall + recent → medium score
+      makeQueryRow("3", 20, OLD_ISO, OLD_ISO),           // high recall + old → decayed
+      makeQueryRow("4", 0, RECENT_ISO),                   // 0 recall → filtered by minRecallCount
     ];
     const querySpy = vi.fn().mockResolvedValue({ data: rows });
     const client = makeClient({ query: querySpy });
@@ -705,7 +705,7 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(candidates[2]!.id).toBe("3");
   });
 
-  it("minRecallCount 过滤", async () => {
+  it("minRecallCount filter", async () => {
     const rows = [
       makeQueryRow("1", 10, RECENT_ISO),
       makeQueryRow("2", 3, RECENT_ISO),
@@ -724,7 +724,7 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(candidates.map((c) => c.id).sort()).toEqual(["1", "3"]);
   });
 
-  it("limit 截断", async () => {
+  it("limit truncation", async () => {
     const rows = Array.from({ length: 10 }, (_, i) =>
       makeQueryRow(String(i + 1), 10 - i, RECENT_ISO),
     );
@@ -742,7 +742,7 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(candidates[0]!.recallCount).toBe(10);
   });
 
-  it("maxAgeDays 过滤旧记录", async () => {
+  it("maxAgeDays filters old records", async () => {
     const rows = [
       makeQueryRow("1", 5, RECENT_ISO, RECENT_ISO),
       makeQueryRow("2", 5, "2026-04-13T12:00:00.000Z"), // exactly 30 days (same hour)
@@ -762,7 +762,7 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(candidates.map((c) => c.id).sort()).toEqual(["1", "2"]);
   });
 
-  it("空结果 → []", async () => {
+  it("empty results → []", async () => {
     const querySpy = vi.fn().mockResolvedValue({ data: [] });
     const client = makeClient({ query: querySpy });
     const manager = createManager({ client });
@@ -771,7 +771,7 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     expect(candidates).toEqual([]);
   });
 
-  it("query 失败 → warnOnce + return []", async () => {
+  it("query failure → warnOnce + return []", async () => {
     const querySpy = vi.fn().mockRejectedValue(new Error("connection lost"));
     const client = makeClient({ query: querySpy });
     const manager = createManager({ client });
@@ -847,7 +847,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(getSpy).not.toHaveBeenCalled();
   });
 
-  it("正常路径：get → insertEntry → upsert → 返回 applied", async () => {
+  it("happy path: get → insertEntry → upsert → returns applied", async () => {
     const getSpy = vi.fn().mockResolvedValue({ data: [makeGetRow("1")] });
     const insertSpy = vi.fn().mockResolvedValue({
       IDs: { int_id: { data: [999] } },
@@ -889,7 +889,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(upsertRow.memory_type).toBe("archived");
   });
 
-  it("多个 candidate 全部成功", async () => {
+  it("all candidates succeed", async () => {
     const getSpy = vi.fn()
       .mockResolvedValueOnce({ data: [makeGetRow("1")] })
       .mockResolvedValueOnce({ data: [makeGetRow("2")] })
@@ -918,7 +918,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(upsertSpy).toHaveBeenCalledTimes(3);
   });
 
-  it("minScore 过滤", async () => {
+  it("minScore filter", async () => {
     const getSpy = vi.fn().mockResolvedValue({ data: [makeGetRow("1")] });
     const insertSpy = vi.fn().mockResolvedValue({
       IDs: { int_id: { data: [101] } },
@@ -940,7 +940,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(result.appliedCandidates[0]!.id).toBe("1");
   });
 
-  it("minRecallCount 过滤", async () => {
+  it("minRecallCount filter", async () => {
     const getSpy = vi.fn().mockResolvedValue({ data: [makeGetRow("1")] });
     const insertSpy = vi.fn().mockResolvedValue({
       IDs: { int_id: { data: [101] } },
@@ -962,7 +962,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(result.appliedCandidates[0]!.id).toBe("1");
   });
 
-  it("limit 截断", async () => {
+  it("limit truncation", async () => {
     const getSpy = vi.fn()
       .mockResolvedValue({ data: [makeGetRow("1")] })
       .mockResolvedValue({ data: [makeGetRow("2")] });
@@ -987,7 +987,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(result.appliedCandidates).toHaveLength(2);
   });
 
-  it("get 失败时跳过该 candidate，继续处理其他", async () => {
+  it("skips failed get candidate, continues processing others", async () => {
     const getSpy = vi.fn()
       .mockResolvedValueOnce({ data: [makeGetRow("1")] })
       .mockRejectedValueOnce(new Error("Memory entry not found: 2"));
@@ -1014,7 +1014,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(upsertSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("insertEntry 失败时跳过该 candidate，继续处理其他", async () => {
+  it("skips failed insertEntry candidate, continues processing others", async () => {
     const getSpy = vi.fn()
       .mockResolvedValue({ data: [makeGetRow("1")] })
       .mockResolvedValue({ data: [makeGetRow("2")] });
@@ -1041,7 +1041,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     expect(upsertSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("过滤后空 list → { applied: 0, appliedCandidates: [] }", async () => {
+  it("empty list after filters → { applied: 0, appliedCandidates: [] }", async () => {
     const getSpy = vi.fn();
     const client = makeClient({ get: getSpy });
     const manager = createManager({ client });

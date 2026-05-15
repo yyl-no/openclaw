@@ -41,10 +41,10 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-// ── 正常路径 ──────────────────────────────────────────────────────
+// ── Happy path ───────────────────────────────────────────────────
 
-describe("memory_get tool: 正常路径", () => {
-  it("传入有效 id → 返回 MemoryEntry", async () => {
+describe("memory_get tool: happy path", () => {
+  it("valid id → returns MemoryEntry", async () => {
     const entry = makeEntry({ id: "42", text: "Hello world" });
     const getSpy = vi.fn().mockResolvedValue(entry);
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
@@ -60,7 +60,7 @@ describe("memory_get tool: 正常路径", () => {
     expect(payload.provenance).toEqual({ kind: "milvus", label: "chat_extract" });
   });
 
-  it("id 前后空格被 trim", async () => {
+  it("leading/trailing whitespace in id is trimmed", async () => {
     const getSpy = vi.fn().mockResolvedValue(makeEntry());
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -69,10 +69,10 @@ describe("memory_get tool: 正常路径", () => {
   });
 });
 
-// ── 异常路径 ──────────────────────────────────────────────────────
+// ── Error paths ──────────────────────────────────────────────────
 
-describe("memory_get tool: 异常路径", () => {
-  it("id 为空字符串返回错误", async () => {
+describe("memory_get tool: error paths", () => {
+  it("empty id string returns error", async () => {
     const getSpy = vi.fn();
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -83,7 +83,7 @@ describe("memory_get tool: 异常路径", () => {
     expect(getSpy).not.toHaveBeenCalled();
   });
 
-  it("id 缺失返回错误", async () => {
+  it("missing id returns error", async () => {
     const getSpy = vi.fn();
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -94,7 +94,7 @@ describe("memory_get tool: 异常路径", () => {
     expect(getSpy).not.toHaveBeenCalled();
   });
 
-  it("not-found → 返回错误", async () => {
+  it("not-found → returns error", async () => {
     const getSpy = vi.fn().mockRejectedValue(new Error("Memory entry not found: 999"));
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -104,7 +104,7 @@ describe("memory_get tool: 异常路径", () => {
     expect(payload.error).toContain("Memory entry not found");
   });
 
-  it("closed → 返回错误", async () => {
+  it("closed → returns error", async () => {
     const getSpy = vi.fn().mockRejectedValue(new Error("MilvusSearchManager is closed"));
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -114,7 +114,7 @@ describe("memory_get tool: 异常路径", () => {
     expect(payload.error).toBe("MilvusSearchManager is closed");
   });
 
-  it("degraded → 返回错误", async () => {
+  it("degraded → returns error", async () => {
     const getSpy = vi.fn().mockRejectedValue(new Error("MilvusSearchManager is in degraded mode"));
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -125,13 +125,13 @@ describe("memory_get tool: 异常路径", () => {
   });
 });
 
-// ── 不触发 recordRecall ──────────────────────────────────────────
+// ── No recordRecall trigger ──────────────────────────────────────
 
-describe("memory_get tool: 不触发 recordRecall", () => {
-  it("成功获取也不调用 recordRecall", async () => {
-    // memory_get tool 本身不持有 recordRecall，验证方式：确认工具
-    // 设计上 manager get() 不包含 recordRecall 调用路径。
-    // 此测试验证 manager.get 被调用且返回正确结果。
+describe("memory_get tool: no recordRecall trigger", () => {
+  it("successful get does not call recordRecall", async () => {
+    // The memory_get tool itself does not hold recordRecall. Verification method: confirm
+    // that manager.get() does not include a recordRecall call path by design.
+    // This test verifies manager.get is called and returns correct results.
     const getSpy = vi.fn().mockResolvedValue(makeEntry());
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 
@@ -143,10 +143,10 @@ describe("memory_get tool: 不触发 recordRecall", () => {
   });
 });
 
-// ── Manager 不可用 ───────────────────────────────────────────────
+// ── Manager unavailable ──────────────────────────────────────────
 
-describe("memory_get tool: manager 不可用", () => {
-  it("manager 为 null 时返回初始化错误", async () => {
+describe("memory_get tool: manager unavailable", () => {
+  it("returns initialization error when manager is null", async () => {
     const tool = createMemoryGetTool({ getManager: () => null });
 
     const result = await tool.execute("call-1", { id: "42" }, undefined);
@@ -156,10 +156,10 @@ describe("memory_get tool: manager 不可用", () => {
   });
 });
 
-// ── path/from/lines 占位忽略 ─────────────────────────────────────
+// ── Ignored path/from/lines placeholders ─────────────────────────
 
-describe("memory_get tool: 冗余参数忽略", () => {
-  it("传入 path/from/lines 时仍只用 id 正常工作", async () => {
+describe("memory_get tool: extra params ignored", () => {
+  it("still works with only id when path/from/lines are passed", async () => {
     const getSpy = vi.fn().mockResolvedValue(makeEntry({ id: "99" }));
     const tool = createMemoryGetTool(makeDeps({ getManager: () => ({ get: getSpy }) }));
 

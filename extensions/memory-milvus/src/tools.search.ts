@@ -1,15 +1,4 @@
-/**
- * memory-milvus memory_search 工具
- *
- * 依据：1-plan.md §Task 16-9 + 2-decisions.md §17
- *
- * - Schema 与 memory-core MemorySearchSchema 一对一
- * - corpus=memory/undefined → manager.search()
- * - corpus=sessions → manager.search() with sessionKey filter
- * - corpus=wiki → searchMemoryCorpusSupplements only
- * - corpus=all → milvus + supplements merged
- * - 命中后自动 recordRecall hook
- */
+/** `memory_search` tool for the Milvus backend — hybrid vector + keyword search. */
 
 import {
   decorateCitations,
@@ -24,12 +13,10 @@ import {
 import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
-// ── Supplement 搜索辅助 ──────────────────────────────────────────
+// ── Supplement search ─────────────────────────────────────────────
 
 /**
- * 搜索已注册的 wiki/外部 corpus supplements。
- * 对齐 memory-core tools.shared.ts searchMemoryCorpusSupplements。
- * 通过 SDK barrel 的 listMemoryCorpusSupplements 获取注册表。
+ * Search registered wiki/external corpus supplements.
  */
 async function searchSupplements(params: {
   query: string;
@@ -61,9 +48,7 @@ async function searchSupplements(params: {
     .slice(0, Math.max(1, params.maxResults ?? 10));
 }
 
-/**
- * 将 supplement 命中转为与 milvus MemoryReference 兼容的结果格式。
- */
+/** Convert supplement hits to a format compatible with milvus MemoryReference. */
 function supplementHitToResult(
   hit: MemoryCorpusSearchResult,
 ): Record<string, unknown> & { corpus: string; score: number; path: string } {
@@ -85,8 +70,8 @@ function supplementHitToResult(
 // ── Merge ───────────────────────────────────────────────────────
 
 /**
- * 多路融合排序：milvus + wiki supplement 命中按 score 排序后取 top-N。
- * 对齐 memory-core tools.ts mergeMemorySearchCorpusResults。
+ * Merge multi-corpus results: milvus + wiki supplement hits sorted by score, top-N.
+ * Aligned with memory-core tools.ts mergeMemorySearchCorpusResults.
  */
 function mergeMultiCorpusResults(params: {
   milvusResults: MemoryReference[];
@@ -109,7 +94,7 @@ function sortByScore<T extends { score: number; path: string }>(results: T[]): T
   });
 }
 
-// ── Schema ──────────────────────────────────────────────────────
+// ── Schema ────────────────────────────────────────────────────────
 
 const MEMORY_SEARCH_SCHEMA = {
   type: "object" as const,
@@ -139,13 +124,13 @@ const MEMORY_SEARCH_SCHEMA = {
   required: ["query"],
 };
 
-// ── Description ─────────────────────────────────────────────────
+// ── Description ───────────────────────────────────────────────────
 
 const MEMORY_SEARCH_DESCRIPTION =
   "Search memory entries using hybrid vector + keyword search. " +
   "Returns a ranked list of memory references with id, snippet, score, and provenance.";
 
-// ── Deps ────────────────────────────────────────────────────────
+// ── Deps ──────────────────────────────────────────────────────────
 
 export interface MemorySearchToolDeps {
   getManager: () => {
@@ -168,7 +153,7 @@ export interface MemorySearchToolDeps {
   sandboxed?: boolean;
 }
 
-// ── Factory ─────────────────────────────────────────────────────
+// ── Factory ───────────────────────────────────────────────────────
 
 export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool {
   return {
@@ -191,7 +176,7 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
 
       try {
 
-      // Corpus routing (T16-9: 对齐 memory-core createMemorySearchTool)
+      // Corpus routing (aligned with memory-core createMemorySearchTool)
       const shouldQueryMilvus = corpus !== "wiki";
       const shouldQuerySupplements = corpus === "wiki" || corpus === "all";
 
@@ -267,7 +252,7 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
         results = decorateCitations(results, includeCitations);
       }
 
-      // Record recall hook (milvus hits only)
+      // Record recall hook (milvus hits only, fire-and-forget)
       if (milvusRaw.length > 0 && manager?.recordRecall) {
         void manager.recordRecall(milvusRaw, { query }).catch(() => {});
       }

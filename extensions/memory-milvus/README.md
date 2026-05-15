@@ -1,56 +1,156 @@
 # Memory (Milvus)
 
-Milvus-backed memory plugin providing vector ANN search for OpenClaw memory.
+`memory-milvus` is a bundled memory plugin that stores long-term memory in
+Milvus and uses vector ANN + BM25 hybrid search for recall. It integrates with
+the same embedding provider adapters as `memory-core` and supports automated
+short-term-to-long-term memory promotion via the OpenClaw dreaming pipeline.
 
-## Current capabilities
+Use it when you want a dedicated vector database for memory, need scalable
+semantic search across large memory collections, or already run a Milvus
+instance in your infrastructure.
 
-| Capability | Status |
-|---|---|
-| `memory_write` tool (vector insert with fallback) | ✅ |
-| `memory_search` tool (ANN + keyword hybrid search) | ✅ |
-| `memory_get` tool (PK lookup) | ✅ |
-| Collection auto-bootstrap (create + load) | ✅ |
-| Degraded mode (Milvus unreachable → ndjson fallback) | ✅ |
-| `recordRecall` (recall-count tracking + upsert) | ✅ |
-| Dreaming promotion `rankPromotionCandidates` + `applyPromotions` | ✅ |
-| Source label / memory type validation | ✅ |
-| Dedup (SHA-256 content hash) + update + soft-delete (archive) | ✅ |
-| AI flush turn prompt integration | ✅ |
-| `memory migrate` CLI (Markdown ↔ Milvus bidirectional) | ✅ |
-| BM25 native hybrid search (Milvus ≥ 2.4, opt-in) | ✅ |
+<Note>
+`memory-milvus` is an active memory plugin. Enable it by selecting the memory
+slot with `plugins.slots.memory = "memory-milvus"`. Companion plugins such as
+`memory-wiki` can run beside it, but only one plugin owns the active memory slot.
+</Note>
 
-## Migration
+## Quick start
 
-The plugin includes a bidirectional migration CLI subcommand under `openclaw memory`.
+Launch a local Milvus instance:
 
 ```bash
-# Forward: scan MEMORY.md + memory/*.md → chunk → embed → Milvus
-openclaw memory migrate ./my-memory-dir
-
-# Reverse: query Milvus → export to memory-export/<timestamp>/
-openclaw memory migrate ./my-memory-dir --reverse
-
-# Dry-run: preview without writing
-openclaw memory migrate ./my-memory-dir --dry-run
-
-# Reverse with type filter
-openclaw memory migrate ./my-memory-dir --reverse --type=short_term
+docker run -d --name milvus-standalone \
+  -p 19530:19530 -p 9091:9091 \
+  milvusdb/milvus:v2.4.0 standalone
 ```
 
-**Dedup**: SHA-256 in-batch dedup by `text + provenance_label`; cross-batch dedup via
-Milvus `provenance_label` query. Reverse output goes to `memory-export/<timestamp>/`
-(human-friendly) and never overwrites the original `memory/*.md`.
+Configure the plugin:
 
-## BM25 Native Full-Text Search (Milvus ≥ 2.4)
+```json5
+{
+  plugins: {
+    slots: {
+      memory: "memory-milvus",
+    },
+    entries: {
+      "memory-milvus": {
+        enabled: true,
+        config: {
+          milvus: {
+            host: "localhost",
+            port: 19530,
+          },
+          embedding: {
+            provider: "alibaba",
+            model: "text-embedding-v3",
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Restart the Gateway after changing plugin config:
+
+```bash
+openclaw gateway restart
+```
+
+Then verify the plugin is loaded:
+
+```bash
+openclaw plugins list
+```
+
+## Provider-backed embeddings
+
+`memory-milvus` uses the same memory embedding provider adapters as
+`memory-core`. Set `embedding.provider` and omit `embedding.apiKey` to use the
+provider's configured auth profile, environment variable, or
+`models.providers.<provider>.apiKey`.
+
+```json5
+{
+  plugins: {
+    slots: {
+      memory: "memory-milvus",
+    },
+    entries: {
+      "memory-milvus": {
+        enabled: true,
+        config: {
+          milvus: { host: "localhost", port: 19530 },
+          embedding: {
+            provider: "openai",
+            model: "text-embedding-3-small",
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Set `embedding.dimensions` for models whose vector size is not built in (the
+plugin defaults to 1024 for `text-embedding-v3`):
+
+```json5
+{
+  plugins: {
+    entries: {
+      "memory-milvus": {
+        config: {
+          embedding: {
+            provider: "alibaba",
+            model: "text-embedding-v4",
+            dimensions: 2048,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+## Search
+
+`memory_search` runs a hybrid vector + keyword pipeline against Milvus:
+
+1. **Vector ANN** via Milvus HNSW index (`anns_field: "embedding"`)
+2. **Full-text** via BM25 sparse vector (`hybridSearch + WeightedRanker`) or
+   scalar filter + client-side TF-IDF as fallback
+3. **Fusion**: `vectorWeight × vectorScore + textWeight × textScore` (default 0.7/0.3)
+4. **MMR re-ranking** (λ=0.7) to reduce redundancy
+5. **Temporal decay** (30-day half-life) to deprioritize old memories
+
+Search weights and BM25 can be adjusted in config:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "memory-milvus": {
+        config: {
+          search: {
+            useBM25: true,
+            vectorWeight: 0.7,
+            textWeight: 0.3,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+### BM25 native full-text search (Milvus ≥ 2.4)
 
 When a BM25 Function is created on the Milvus server, the plugin can use
-native hybrid search (`hybridSearch + WeightedRanker`) instead of the
-client-side TF-IDF fallback.
-
-### Server-side setup
-
-Create the BM25 Function on your Milvus instance (requires Milvus ≥ 2.4).
-This cannot be done via the Node.js SDK — use the RESTful API or pymilvus.
+native hybrid search instead of the client-side TF-IDF fallback. The BM25
+Function is not created automatically — create it via the RESTful API or
+pymilvus.
 
 **Via RESTful API** (replace `<host>`, `<port>`, `<collection>`):
 
@@ -81,155 +181,264 @@ bm25_fn = Function(
 col.create_function(bm25_fn)
 ```
 
-After creating the Function, enable BM25 in the plugin config:
+After creating the Function, enable BM25 in the plugin config with
+`search.useBM25: true`. If the Function is not available, the plugin falls
+back to separate ANN + client-side TF-IDF automatically.
 
-```json
+## Memory promotion (dreaming)
+
+`memory-milvus` supports automated short-term-to-long-term memory promotion
+via the OpenClaw dreaming pipeline. The pipeline runs three phases:
+
+- **Light**: scans recent short-term memories for candidates
+- **REM**: groups candidates by session and merges related memories via an LLM
+- **Deep**: scores candidates by recall frequency and recency, then promotes
+  those above threshold to long-term memory
+
+Configure the dreaming schedule:
+
+```json5
 {
-  "config": {
-    "milvus": { "host": "localhost", "port": 19530 },
-    "search": { "useBM25": true, "vectorWeight": 0.7, "textWeight": 0.3 }
-  }
+  plugins: {
+    entries: {
+      "memory-milvus": {
+        config: {
+          dreaming: {
+            enabled: true,
+            cron: "0 3 * * *",
+            limit: 5,
+            minScore: 0.3,
+            minRecallCount: 2,
+          },
+        },
+      },
+    },
+  },
 }
 ```
 
-The plugin will then use a single `hybridSearch` call with both the
-dense embedding and sparse BM25 fields, combined via `WeightedRanker`.
-If the BM25 Function is not available, it falls back to separate
-ANN + client-side TF-IDF automatically.
+| Setting                | Default        | Description |
+|------------------------|----------------|-------------|
+| `dreaming.enabled`     | `false`        | Enable scheduled dreaming |
+| `dreaming.cron`        | `"0 3 * * *"`  | Cron expression for sweep cadence |
+| `dreaming.limit`       | `5`            | Max candidates to promote per sweep |
+| `dreaming.minScore`    | `0.3`          | Minimum composite score (0-1) |
+| `dreaming.minRecallCount` | `2`          | Minimum recall count for consideration |
+| `dreaming.recencyHalfLifeDays` | `30`  | Half-life (days) for recency weight |
 
-### Fallback chain
+Run a manual dreaming sweep:
 
 ```
-search()
-  ├─ useBM25=true? → searchBM25() via hybridSearch
-  │   ├─ success → apply decay + MMR → done
-  │   └─ null (Function missing / error) → legacy path
-  └─ legacy: searchVector() + searchKeyword() → mergeResults → MMR
+/milvus-dreaming run
 ```
 
 ## Citation control
 
-`memory_search` honors `cfg.memory.citations` ("on" | "off" | "auto") to
-append source citations (`\n\nSource: ...`) to search result snippets.
-Auto mode enables citations for direct chats, disables for group/channel
-contexts. Shared via `openclaw/plugin-sdk/memory-core-host-runtime-core` barrel.
+`memory_search` honors `cfg.memory.citations` (`"on"` | `"off"` | `"auto"`)
+to append source citations to search result snippets. Auto mode enables
+citations for direct chats and disables them for group/channel contexts.
 
-## Session visibility
-
-`memory_search` applies `filterMemorySearchHitsBySessionVisibility` on milvus
-hits before building results, filtering `source:"sessions"` hits by the
-requester's visibility policy. Shared via the same runtime-api barrel.
-
-## Not yet available
-
-| Capability | Target |
-|---|---|
-| 9-dim advanced recall signals (dailyCount/groundedCount/...) | TBD |
-
-## Enable
-
-The `memory-milvus` plugin is mutually exclusive with `memory-core`.
-Set `plugins.slots.memory` to activate it — all other `kind:"memory"`
-plugins are automatically disabled.
-
-```json
-// openclaw.config.json
+```json5
 {
-  "plugins": {
-    "slots": {
-      "memory": "memory-milvus"
+  memory: {
+    citations: "auto",
+  },
+  plugins: {
+    slots: {
+      memory: "memory-milvus",
     },
-    "entries": {
+    entries: {
       "memory-milvus": {
-        "enabled": true,
-        "config": {
-          "milvus": {
-            "host": "localhost",
-            "port": 19530
-          },
-          "embedding": {
-            "provider": "alibaba",
-            "model": "text-embedding-v3"
-          }
-        }
-      }
-    }
-  }
+        enabled: true,
+        config: {
+          milvus: { host: "localhost", port: 19530 },
+          embedding: { provider: "alibaba", model: "text-embedding-v3" },
+        },
+      },
+    },
+  },
 }
 ```
 
-**Switching back to `memory-core`**: change `plugins.slots.memory` to
-`"memory-core"`. Your Milvus data and Markdown files are stored independently —
-neither is lost when you switch.
+## Multi-corpus search
 
-**Startup verification**: after switching, the gateway startup log will show
-`memory-milvus` among the loaded plugins. If the Milvus server is unreachable,
-the plugin initializes in "degraded" mode (falls back to local ndjson files)
-and logs a warning.
+`memory_search` supports the same `corpus` parameter as `memory-core`:
 
-## Quick start (Docker)
+| `corpus`     | Behavior |
+|--------------|----------|
+| `memory`     | Searches the main Milvus memory store (default) |
+| `sessions`   | Searches Milvus with session key filtering |
+| `wiki`       | Searches registered wiki supplements only |
+| `all`        | Merges Milvus hits with wiki supplement hits, sorted by score |
 
-Launch a local Milvus instance:
+## Agent isolation
 
-```bash
-# Standalone mode with embedded etcd
-docker run -d --name milvus-standalone \
-  -p 19530:19530 -p 9091:9091 \
-  milvusdb/milvus:v2.4.0 standalone
-```
+All agents share a single Milvus collection. Agent isolation is enforced at
+the query level — every `search`, `get`, and `recordRecall` call automatically
+filters by `agent_id`. This produces the same isolation effect as the
+per-agent workspace directories used by `memory-core`, without the storage
+overhead of separate collections.
 
-Configure the plugin in `openclaw.yaml`:
+## Commands
 
-```yaml
-plugins:
-  entries:
-    memory-milvus:
-      config:
-        milvus:
-          host: localhost
-          port: 19530
-        embedding:
-          provider: alibaba
-          model: text-embedding-v3
-```
+### Memory migration
 
-## Testing
-
-### Unit tests (no Milvus required)
+The plugin registers a `memory-migrate` CLI command for bidirectional
+migration between Markdown files and Milvus:
 
 ```bash
-pnpm test extensions/memory-milvus
+# Forward: Markdown → Milvus
+openclaw memory-migrate ./my-memory-dir
+
+# Reverse: Milvus → Markdown (exports to memory-export/<timestamp>/)
+openclaw memory-migrate ./my-memory-dir --reverse
+
+# Dry-run: preview without writing
+openclaw memory-migrate ./my-memory-dir --dry-run
+
+# Reverse with type filter
+openclaw memory-migrate ./my-memory-dir --reverse --type=short_term
 ```
 
-### Live tests (requires Milvus + embedding API key)
+Forward migration scans `MEMORY.md` and `memory/YYYY-MM-DD.md`, chunks by
+heading, embeds via the configured provider, and inserts into Milvus. Reverse
+migration exports to a timestamped output directory and never overwrites the
+original Markdown files.
 
-Live end-to-end tests are guarded behind `OPENCLAW_LIVE_TEST=1`, covering write → search → recordRecall → promotion pipelines.
+### Dreaming
+
+```
+/milvus-dreaming run     Run a manual dreaming sweep
+/milvus-dreaming status  Show dreaming pipeline status
+```
+
+## Storage
+
+The plugin stores memory entries in a single Milvus collection (default name
+`openclaw_memory`). The collection is auto-created on first startup with a
+fixed schema including:
+
+- Dense vector index (HNSW, configurable `M` / `efConstruction` / `metric_type`)
+- Optional sparse vector index for BM25 (requires manual Function creation)
+- Scalar fields for `agent_id`, `session_key`, `memory_type`, timestamps,
+  recall counters, provenance metadata, and a SHA-256 content hash for dedup
+
+Collection lifecycle is managed eagerly at plugin init — existing collections
+are detected and re-used; missing indexes are created; the collection is loaded
+into memory if not already.
+
+### Degraded mode
+
+If the Milvus server is unreachable at startup, the plugin initializes in
+"degraded" mode:
+
+- Write operations fall back to local ndjson files (`memory/.milvus-fallback/`)
+- Search returns empty results
+- The plugin logs a warning and continues — the Gateway is not blocked
+
+When Milvus becomes reachable again, accumulated fallback entries are
+automatically replayed on the next write.
+
+## Runtime dependencies
+
+`memory-milvus` depends on `@zilliz/milvus2-sdk-node` ^2.5.0. The plugin
+connects to a Milvus server over gRPC — the server is not bundled or managed
+by OpenClaw. Start a standalone Milvus instance via Docker (see Quick start)
+or point the plugin at an existing Milvus deployment.
+
+The plugin does not depend on `memory-core` at runtime — it self-registers
+the built-in memory embedding providers (`auto` / `local` / `openai`).
+
+## Switching backends
+
+`memory-milvus` and `memory-core` are mutually exclusive via the memory slot.
+Switch between them by changing a single config key and restarting the Gateway:
+
+```json5
+// Memory (Milvus)
+{ plugins: { slots: { memory: "memory-milvus" } } }
+
+// Memory (Core) — default file-based backend
+{ plugins: { slots: { memory: "memory-core" } } }
+
+// No active memory plugin
+{ plugins: { slots: { memory: "none" } } }
+```
+
+Milvus data and Markdown files are stored independently — switching backends
+does not delete or migrate data in either direction. Use the
+`memory-migrate` command to move existing Markdown memories into Milvus.
+
+## Troubleshooting
+
+### Plugin loads but no memories appear
+
+Check that `plugins.slots.memory` points at `"memory-milvus"`, then verify
+the Milvus connection:
 
 ```bash
-# Start Milvus first (see Quick start above)
-export OPENCLAW_LIVE_TEST=1
-export OPENAI_API_KEY="sk-..."
-pnpm test:live extensions/memory-milvus
+openclaw plugins list
 ```
 
-## Architecture
+If the plugin log shows "degraded mode", the Milvus server is unreachable.
+Start a local Milvus instance or check the `milvus.host` / `milvus.port`
+config values.
 
-The plugin registers a `MemoryPluginCapability` that is mutually exclusive with
-`memory-core`. Switching backends only requires changing the `plugins.slots.memory`
-entry — the AI tool chain (`memory_write`) remains consistent.
+### Embedding provider unavailable
 
+The plugin uses `embedding.provider: "auto"` by default. If you see an
+"Unknown memory embedding provider" error, ensure the corresponding provider
+plugin is enabled and configured. Common options:
+
+- `"openai"` — requires an OpenAI API key in the auth profile or `OPENAI_API_KEY`
+- `"alibaba"` — requires Alibaba Cloud credentials
+- `"auto"` — tries available built-in providers in order
+
+### Collection bootstrap fails
+
+If the plugin cannot create the Milvus collection, it falls back to degraded
+mode. Common causes:
+
+- Milvus server is not running or not reachable
+- Authentication is required but not configured
+- The collection name conflicts with an existing incompatible collection
+
+Check the Gateway logs for the specific error:
+
+```bash
+openclaw gateway logs | grep memory-milvus
 ```
-AI flush turn
-  ↓ memory_write(text, label?)
-  ↓ MilvusSearchManager.write()
-  ↓ health check → embed → insert → vector stored
-  ↓ on failure → ndjson fallback (zero data loss)
+
+### Dreaming sweep runs but promotes zero candidates
+
+This is expected when no short-term memories have been recalled enough times.
+The dreaming pipeline requires:
+
+- `memory_search` hits to accumulate `recall_count` on entries
+- `recall_count >= dreaming.minRecallCount` (default 2)
+- `composite score >= dreaming.minScore` (default 0.3)
+
+Run a few `memory_search` queries to build up recall counts before the next
+sweep, or lower `dreaming.minRecallCount` / `dreaming.minScore` for faster
+promotion.
+
+### BM25 hybrid search not working
+
+The BM25 path is opt-in and requires a BM25 Function on the Milvus server
+(see BM25 setup above). Without the Function, `search.useBM25: true` will
+log a warning and fall back to the default ANN + TF-IDF path.
+
+Verify the Function exists:
+
+```bash
+curl "http://<host>:<port>/v2/vectordb/functions/list" \
+  -d '{"collectionName": "<collection>"}'
 ```
 
-## References
+## Related
 
-- [Task 10 plan](../../refactor/1-plan.md)
-- [Task 10 decisions](../../refactor/2-decisions.md)
-- [Task 13](#) — Dreaming promotion (completed)
-- [Task 14](#) — Markdown ↔ Milvus migration tool (completed)
-- [Task 16](#) — Dedup / citation / multi-corpus
+- [Memory overview](/concepts/memory)
+- [Active memory](/concepts/active-memory)
+- [Memory search](/concepts/memory-search)
+- [Memory Core](/plugins/memory-core)
+- [Memory Wiki](/plugins/memory-wiki)

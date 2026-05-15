@@ -13,7 +13,7 @@ const DEFAULT_CONFIG: CollectionBootstrapConfig = {
   embeddingDim: 1024,
 };
 
-/** 成功响应 */
+/** Success response */
 const okStatus = { error_code: "Success", reason: "" };
 
 function mockClient(overrides: Partial<Record<keyof MilvusClient, unknown>> = {}): MilvusClient {
@@ -28,10 +28,10 @@ function mockClient(overrides: Partial<Record<keyof MilvusClient, unknown>> = {}
   } as unknown as MilvusClient;
 }
 
-// ── 场景 1: 全新创建 ─────────────────────────────────────────────
+// ── Scenario 1: Fresh creation ───────────────────────────────────
 
-describe("ensureCollectionReady: 全新创建", () => {
-  it("执行完整三步：create_collection → create_index → load_collection", async () => {
+describe("ensureCollectionReady: fresh creation", () => {
+  it("executes full three steps: create_collection → create_index → load_collection", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockRejectedValue(new Error("not found")),
       createCollection: vi.fn().mockResolvedValue(okStatus),
@@ -72,10 +72,10 @@ describe("ensureCollectionReady: 全新创建", () => {
   });
 });
 
-// ── 场景 2: Collection 已存在 ─────────────────────────────────────
+// ── Scenario 2: Collection exists ────────────────────────────────
 
-describe("ensureCollectionReady: 已存在", () => {
-  it("Collection+Index+Loaded 全部已存在时，三步全部跳过", async () => {
+describe("ensureCollectionReady: already exists", () => {
+  it("skips all three steps when Collection+Index+Loaded all exist", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockResolvedValue({
         status: okStatus,
@@ -96,10 +96,10 @@ describe("ensureCollectionReady: 已存在", () => {
   });
 });
 
-// ── 场景 3: 部分存在（Collection 有，Index 无）────────────────────
+// ── Scenario 3: Partially exists (Collection yes, Index no) ──────
 
-describe("ensureCollectionReady: 部分存在", () => {
-  it("Collection 已存在但无 Index 时，跳过 create_collection，执行 create_index + load", async () => {
+describe("ensureCollectionReady: partially exists", () => {
+  it("Collection exists but no Index: skip create_collection, run create_index + load", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockResolvedValue({
         status: okStatus,
@@ -119,7 +119,7 @@ describe("ensureCollectionReady: 部分存在", () => {
     expect(client.loadCollection).toHaveBeenCalledTimes(1);
   });
 
-  it("Collection+Index 已存在但未 Loaded 时，仅执行 load_collection", async () => {
+  it("Collection+Index exist but not Loaded: only run load_collection", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockResolvedValue({
         status: okStatus,
@@ -141,10 +141,10 @@ describe("ensureCollectionReady: 部分存在", () => {
   });
 });
 
-// ── 场景 4: create_collection 失败 ─────────────────────────────────
+// ── Scenario 4: create_collection failure ────────────────────────
 
-describe("ensureCollectionReady: 失败抛出", () => {
-  it("createCollection 返回 error_code 非 Success 时抛出", async () => {
+describe("ensureCollectionReady: failure throws", () => {
+  it("createCollection returns non-Success error_code, throws", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockRejectedValue(new Error("not found")),
       createCollection: vi.fn().mockResolvedValue({
@@ -157,7 +157,7 @@ describe("ensureCollectionReady: 失败抛出", () => {
       .rejects.toThrow("Failed to create collection");
   });
 
-  it("createIndex 返回 error_code 非 Success 时抛出", async () => {
+  it("createIndex returns non-Success error_code, throws", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockRejectedValue(new Error("not found")),
       createCollection: vi.fn().mockResolvedValue(okStatus),
@@ -173,10 +173,10 @@ describe("ensureCollectionReady: 失败抛出", () => {
   });
 });
 
-// ── 场景 5: HNSW 参数透传 ──────────────────────────────────────────
+// ── Scenario 5: HNSW parameter passthrough ───────────────────────
 
-describe("ensureCollectionReady: HNSW 参数", () => {
-  it("使用 config 中指定的 HNSW 参数而非默认值", async () => {
+describe("ensureCollectionReady: HNSW params", () => {
+  it("uses config-specified HNSW params instead of defaults", async () => {
     const client = mockClient({
       describeCollection: vi.fn().mockResolvedValue({
         status: okStatus,
@@ -201,11 +201,11 @@ describe("ensureCollectionReady: HNSW 参数", () => {
   });
 });
 
-// ── 场景 6: 网络错误 → 调用方处理 degraded ─────────────────────────
+// ── Scenario 6: Network error → caller handles degraded ──────────
 
-describe("ensureCollectionReady: 网络错误", () => {
-  it("describeCollection 抛网络错误时，ensureCollectionReady 向上抛出", async () => {
-    // 连接错误 → tryDescribe 返回 null → createCollection 同样失败 → 向上抛
+describe("ensureCollectionReady: network error", () => {
+  it("describeCollection throws network error, ensureCollectionReady re-throws", async () => {
+    // connect error → tryDescribe returns null → createCollection also fails → re-throw
     const client = mockClient({
       describeCollection: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")),
       createCollection: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")),

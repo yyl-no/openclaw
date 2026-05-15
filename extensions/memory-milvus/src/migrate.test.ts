@@ -1,7 +1,7 @@
 /**
- * migrate.ts 单元测试
+ * Unit tests for migrate.ts
  *
- * 依据：1-plan.md §Task14 测试策略
+ * Strategy: 1-plan.md §Task14
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

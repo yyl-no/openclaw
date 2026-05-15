@@ -1,12 +1,10 @@
 /**
- * Milvus 混合检索（ANN + scalar filter）实现
+ * Milvus hybrid search (ANN + scalar filter) implementation.
  *
- * 依据：1-plan.md §Task9 + 2-decisions.md §8.1
- *
- * - 向量搜索：milvusClient.search({ anns_field: "embedding" })
- * - 文本搜索：milvusClient.query({ filter: 'text like "%keyword%"' }) + 客户端 TF-IDF
- * - 评分融合：score = w1 × vectorScore + w2 × textScore → MMR → 时间衰减
- * - ⚠️ 后期升级：Milvus ≥ 2.4 BM25 Function 后切换为原生 BM25（见 decisions §8.1）
+ * - Vector search: client.search({ anns_field: "embedding" })
+ * - Text search: client.query({ filter: 'text like "%keyword%"' }) + client-side TF-IDF
+ * - Score fusion: score = w1 × vectorScore + w2 × textScore → MMR → temporal decay
+ * - BM25 native hybrid search available when Milvus ≥ 2.4 has a BM25 Function
  */
 
 import { MilvusClient, type NumberArrayId, type QueryReq, type RowData, type SearchSimpleReq } from "@zilliz/milvus2-sdk-node";
@@ -51,7 +49,7 @@ import {
 import { replayFallback, writeFallback } from "./fallback.js";
 import { warnOnce } from "./warn-once.js";
 
-// ── 配置类型 ──────────────────────────────────────────────────────
+// ── Config types ──────────────────────────────────────────────────
 
 export interface MilvusSearchConfig {
   host: string;
@@ -71,27 +69,26 @@ export interface MilvusSearchConfig {
   };
 }
 
-// ── 默认参数 ──────────────────────────────────────────────────────
+// ── Defaults ──────────────────────────────────────────────────────
 
 const DEFAULT_MAX_RESULTS = 10;
 const DEFAULT_MIN_SCORE = 0;
 const DEFAULT_VECTOR_WEIGHT = 0.7;
 const DEFAULT_TEXT_WEIGHT = 0.3;
-/** 向量搜索拉取倍数（扩大召回池供融合筛选） */
+/** Vector search fetch multiplier (larger recall pool for fusion) */
 const VECTOR_FETCH_MULTIPLIER = 3;
 
-// ── 关键词抽取 ────────────────────────────────────────────────────
+// ── Keyword extraction ────────────────────────────────────────────
 
 /**
- * 从查询文本中抽取关键词（用于 scalar filter / BM25 查询向量构建）。
+ * Extract keywords from query text for scalar filter / BM25 sparse vector.
  *
- * 算法为简单 Unicode 分词：提取 \\p{L}\\p{N}_ 连续序列，去重，过滤长度 < 2。
- * 这产生的是**偏上限**的关键词集合——客户端无法实现服务端 BM25 的
- * 语言感知分词（如中文分词、词干提取、停用词过滤），因此召回会偏多
- * 但不会漏。BM25 原生路径下此集合仅用于构建 query sparse vector，
- * 实际 BM25 计算由服务端 Function 负责。
- *
- * 返回去重后的关键词列表。
+ * Uses simple Unicode tokenization: extract \\p{L}\\p{N}_ sequences,
+ * deduplicate, and filter length < 2.
+ * This produces an upper-bound keyword set — the client cannot do
+ * language-aware tokenization (CJK segmentation, stemming, stopwords).
+ * Under native BM25 the set is only used to build a query sparse vector;
+ * the server-side BM25 Function handles actual tokenization and weighting.
  */
 function extractKeywords(query: string): string[] {
   const tokens = query
@@ -103,8 +100,8 @@ function extractKeywords(query: string): string[] {
 }
 
 /**
- * 构建 Milvus scalar filter 表达式（"text like" 查询）
- * 使用 OR 连接多个关键词的 like 条件。
+ * Build a Milvus scalar filter expression ("text like" query).
+ * OR-joins multiple keyword like clauses.
  */
 function buildKeywordFilter(keywords: string[], agentId?: string): string {
   const parts: string[] = [];
@@ -173,8 +170,8 @@ function combineFilters(a: string, b?: string): string {
 // ── TF-IDF ────────────────────────────────────────────────────────
 
 /**
- * 客户端 TF-IDF 评分
- * 对 query() 返回的关键词搜索结果计算 textScore。
+ * Client-side TF-IDF scoring on keyword search results.
+ * Computes textScore for each doc returned by query().
  */
 function computeTfIdfScores(
   docs: Array<{ id: string; text: string }>,
@@ -186,7 +183,7 @@ function computeTfIdfScores(
   const totalDocs = docs.length;
   const idf = new Map<string, number>();
 
-  // 计算 IDF：关键词在多少文档中出现
+  // Compute IDF: doc frequency for each keyword
   for (const kw of queryKeywords) {
     const docCount = docs.filter((d) =>
       d.text.toLowerCase().includes(kw),
@@ -195,24 +192,24 @@ function computeTfIdfScores(
     idf.set(kw, Math.log(1 + totalDocs / Math.max(1, docCount)));
   }
 
-  // 计算每个文档的 TF-IDF 总分
+  // Compute TF-IDF score for each document
   for (const doc of docs) {
     const lowerText = doc.text.toLowerCase();
     let score = 0;
     for (const kw of queryKeywords) {
       const idfVal = idf.get(kw) ?? 0;
       if (idfVal <= 0) continue;
-      // TF = 关键词出现次数
+      // TF = keyword occurrence count
       const matches = lowerText.split(kw).length - 1;
       if (matches > 0) {
-        // 子线性 TF：1 + log(tf)
+        // Sub-linear TF: 1 + log(tf)
         score += (1 + Math.log(matches)) * idfVal;
       }
     }
     scores.set(doc.id, score);
   }
 
-  // 归一化到 0-1
+  // Normalize to 0-1
   const maxScore = Math.max(1, ...scores.values());
   for (const [id, score] of scores) {
     scores.set(id, score / maxScore);
@@ -221,26 +218,26 @@ function computeTfIdfScores(
   return scores;
 }
 
-// ── 向量分数归一化 ────────────────────────────────────────────────
+// ── Vector score normalization ────────────────────────────────────
 
 /**
- * 向量距离 → 相似度分数 (0-1)
- * 支持 L2 和 IP/COSINE 度量类型。
+ * Convert vector distance to similarity score (0-1).
+ * Supports L2 and IP/COSINE metric types.
  */
 function normalizeVectorScore(rawScore: number, metricType?: string): number {
   if (metricType === "L2") {
-    // L2 距离：越小越好，映射到 0-1
+    // L2 distance: smaller is better, map to 0-1
     return 1 / (1 + rawScore);
   }
-  // IP/COSINE：越大越好，截断到 0-1
+  // IP/COSINE: larger is better, clamp to 0-1
   return Math.max(0, Math.min(1, rawScore));
 }
 
-// ── 时间衰减 ──────────────────────────────────────────────────────
+// ── Temporal decay ──────────────────────────────────────────────────
 
 /**
- * 时间衰减因子
- * 越旧的记忆分数越低。
+ * Temporal decay factor.
+ * Older memories receive lower scores.
  */
 function temporalDecayFactor(createdAt: string, halfLifeDays = 30): number {
   if (!createdAt) return 1;
@@ -248,7 +245,7 @@ function temporalDecayFactor(createdAt: string, halfLifeDays = 30): number {
   if (Number.isNaN(createdMs)) return 1;
   const ageDays = (Date.now() - createdMs) / (1000 * 60 * 60 * 24);
   if (ageDays <= 0) return 1;
-  // 半衰期衰减：2^(-age/halfLife)
+  // Half-life decay: 2^(-age/halfLife)
   return Math.pow(2, -ageDays / halfLifeDays);
 }
 
@@ -285,10 +282,10 @@ function computePromotionScore(params: {
   return normalizedRecall * decay;
 }
 
-// ── MMR（最大边际相关性）───────────────────────────────────────────
+// ── MMR (Maximal Marginal Relevance) ──────────────────────────────
 
 /**
- * MMR 重排序：平衡相关性与多样性
+ * MMR re-ranking: balance relevance and diversity.
  */
 function applyMMR(
   results: MemoryReference[],
@@ -300,7 +297,7 @@ function applyMMR(
   const selected: MemoryReference[] = [];
   const candidates = [...results];
 
-  // 第一个结果选最高分
+  // Sort candidates by descending score; first result is the highest
   candidates.sort((a, b) => b.score - a.score);
   selected.push(candidates.shift()!);
 
@@ -310,7 +307,7 @@ function applyMMR(
 
     for (let i = 0; i < candidates.length; i++) {
       const relevance = candidates[i].score;
-      // 与已选结果的最大文本相似度（Jaccard 近似）
+      // Max text similarity to previously selected results (Jaccard approximation)
       let maxSimilarity = 0;
       const candTokens = new Set(candidates[i].snippet.toLowerCase().split(/\s+/));
       for (const sel of selected) {
@@ -357,7 +354,7 @@ export class MilvusSearchManager {
     this.degraded = opts?.degraded ?? false;
   }
 
-  // ── 主搜索 ────────────────────────────────────────────────────
+  // ── Main search ──────────────────────────────────────────────
 
   async search(
     query: string,
@@ -395,7 +392,7 @@ export class MilvusSearchManager {
       excludeArchived: !opts?.includeArchived,
     });
 
-    // 清理查询文本
+    // Clean query text
     const cleaned = query.trim();
 
     // Empty query with scalar filters → pure query (no semantic search)
@@ -405,7 +402,7 @@ export class MilvusSearchManager {
       return refs.filter((r) => r.score >= minScore).slice(0, maxResults);
     }
 
-    // 1. 获取查询向量
+    // 1. Get query embedding
     let queryVec: number[] = [];
     try {
       queryVec = await this.provider.embedQuery(cleaned);
@@ -414,7 +411,7 @@ export class MilvusSearchManager {
     }
     const hasVector = queryVec.length > 0 && queryVec.some((v) => v !== 0);
 
-    // 2. 尝试原生 BM25 混合搜索（useBM25=true 且 Milvus ≥ 2.4 有 BM25 Function）
+    // 2. Try native BM25 hybrid search (useBM25=true and Milvus ≥ 2.4 with BM25 Function)
     const useBM25 = this.cfg.search?.useBM25 ?? false;
     let merged: MemoryReference[] | undefined;
 
@@ -423,7 +420,7 @@ export class MilvusSearchManager {
         queryVec, cleaned, effectiveAgentId, fetchLimit, scalarFilter,
       );
       if (bm25Results !== null) {
-        // 应用时间衰减（legacy 路径由 mergeResults 内置衰减）
+        // Apply temporal decay (legacy path applies decay in mergeResults)
         merged = bm25Results.map((r) => ({
           ...r,
           score: r.score * temporalDecayFactor(
@@ -431,10 +428,10 @@ export class MilvusSearchManager {
           ),
         }));
       }
-      // null → 降级到 legacy 路径
+      // null → fall back to legacy path
     }
 
-    // 3. Legacy 路径: 独立 ANN + 关键词搜索 + 评分融合（含衰减）
+    // 3. Legacy path: separate ANN + keyword search + score fusion (includes decay)
     if (!merged) {
       let vectorRefs: MemoryReference[] = [];
       if (hasVector) {
@@ -460,16 +457,16 @@ export class MilvusSearchManager {
       merged = this.mergeResults(vectorRefs, keywordRefs, vw, tw);
     }
 
-    // 4. MMR 重排序
+    // 4. MMR re-ranking
     const mmrResults = applyMMR(merged, 0.7, maxResults * 2);
 
-    // 5. 过滤、排序、截断
+    // 5. Filter, sort, truncate
     return mmrResults
       .filter((r) => r.score >= minScore)
       .slice(0, maxResults);
   }
 
-  // ── 向量搜索 ──────────────────────────────────────────────────
+  // ── Vector search ────────────────────────────────────────────
 
   private async searchVector(
     vector: number[],
@@ -510,7 +507,7 @@ export class MilvusSearchManager {
     });
   }
 
-  // ── 关键词搜索 ────────────────────────────────────────────────
+  // ── Keyword search ──────────────────────────────────────────
 
   private async searchKeyword(
     keywords: string[],
@@ -538,7 +535,7 @@ export class MilvusSearchManager {
       return [];
     }
 
-    // 客户端 TF-IDF 计算 textScore
+    // Client-side TF-IDF computes textScore
     const docs = response.data.map((row: Record<string, unknown>) => ({
       id: String(row[FIELD_ID] ?? ""),
       text: String(row[FIELD_TEXT] ?? ""),
@@ -553,7 +550,7 @@ export class MilvusSearchManager {
     });
   }
 
-  // ── BM25 原生搜索（hybridSearch + WeightedRanker）───────────
+  // ── BM25 native hybrid search (hybridSearch + WeightedRanker) ─
 
   /**
    * Try native BM25 hybrid search when Milvus ≥ 2.4 has a BM25 Function
@@ -631,7 +628,7 @@ export class MilvusSearchManager {
     }
   }
 
-  // ── 纯标量过滤查询（无语义搜索） ──────────────────────────────
+  // ── Scalar-only filter query (no semantic search) ──────────
 
   /**
    * Query by scalar filter only (no vector search).
@@ -662,7 +659,7 @@ export class MilvusSearchManager {
     });
   }
 
-  // ── 结果融合 ──────────────────────────────────────────────────
+  // ── Result fusion ────────────────────────────────────────────
 
   private mergeResults(
     vectorRefs: MemoryReference[],
@@ -672,7 +669,7 @@ export class MilvusSearchManager {
   ): MemoryReference[] {
     const byId = new Map<string, MemoryReference>();
 
-    // 向量结果
+    // Vector results
     for (const r of vectorRefs) {
       byId.set(r.id, {
         ...r,
@@ -681,13 +678,13 @@ export class MilvusSearchManager {
       });
     }
 
-    // 关键词结果
+    // Keyword results
     for (const r of keywordRefs) {
       const existing = byId.get(r.id);
       if (existing) {
         existing.textScore = r.textScore ?? r.score;
         existing.score = vectorWeight * (existing.vectorScore ?? 0) + textWeight * (r.textScore ?? r.score);
-        // 优先使用关键词匹配的 snippet（更相关）
+        // Prefer the keyword-matched snippet (more relevant)
         if (r.snippet && r.snippet.length > (existing.snippet?.length ?? 0)) {
           existing.snippet = r.snippet;
         }
@@ -700,7 +697,7 @@ export class MilvusSearchManager {
       }
     }
 
-    // 应用时间衰减
+    // Apply temporal decay
     const results: MemoryReference[] = [];
     for (const [, ref] of byId) {
       const decay = temporalDecayFactor(
@@ -710,17 +707,17 @@ export class MilvusSearchManager {
       results.push({ ...ref, score: ref.score * decay });
     }
 
-    // 按分数降序排列
+    // Sort by score descending
     results.sort((a, b) => b.score - a.score);
     return results;
   }
 
-  // ── 按 ID 读取 ────────────────────────────────────────────────
+  // ── Read by ID ──────────────────────────────────────────────
 
   async readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult> {
     if (this.closed) throw new Error("MilvusSearchManager is closed");
 
-    // Milvus 后端：relPath 解释为记忆 ID
+    // In the milvus backend, relPath is interpreted as a memory id
     const id = params.relPath.trim();
     if (!id) throw new Error("Missing memory id");
 
@@ -755,13 +752,12 @@ export class MilvusSearchManager {
     };
   }
 
-  // ── get(id) — MemoryDataBackend.get ───────────────────────────
+  // ── get(id) — MemoryDataBackend.get ─────────────────────────
 
   /**
-   * 按 id 查询 PK → MemoryEntry。
-   * 一次性取全 13 个字段（含 β last_recalled_at）。
-   * not-found / closed / degraded → throw。
-   * 不触发 recordRecall（按 PK 直查不计入召回统计）。
+   * Look up a memory entry by PK id.
+   * Returns all 13 fields.
+   * Does not trigger recordRecall (direct PK lookup is not a search).
    */
   async get(id: string): Promise<MemoryEntry> {
     if (this.closed) throw new Error("MilvusSearchManager is closed");
@@ -797,17 +793,13 @@ export class MilvusSearchManager {
     return rowToMemoryEntry(response.data[0] as Record<string, unknown>);
   }
 
-  // ── update(id, patch) — MemoryDataBackend.update ──────────────
+  // ── update(id, patch) — MemoryDataBackend.update ────────────
 
   /**
-   * 更新一条记忆：query → merge patch → re-embed if text changed → upsert。
+   * Update a memory entry: query → merge patch → re-embed if text changed → upsert.
    *
-   * @param id   目标记录主键
-   * @param patch 要合并的字段（text/snippet/memoryType/sessionKey/provenanceLabel）
-   * @returns 更新后的 MemoryEntry
-   *
-   * 失败语义（§12.7）：not-found / closed / degraded → throw；
-   * update 失败直接抛出，不走 fallback（update 是精确操作，不可丢）。
+   * Failure semantics: not-found / closed / degraded → throw.
+   * Update failures are fatal — they do not fall back to ndjson.
    */
   async update(
     id: string,
@@ -893,13 +885,12 @@ export class MilvusSearchManager {
     };
   }
 
-  // ── archive(id) — 软删除 ────────────────────────────────────
+  // ── archive(id) — Soft delete ─────────────────────────────
 
   /**
-   * 软删除一条记忆：设置 memory_type = "archived"。
-   *
-   * 搜索默认排除 archived 类型，`includeArchived: true` 可查。
-   * 与 update 一致，失败直接 throw，不走 fallback。
+   * Soft-delete a memory entry: set memory_type = "archived".
+   * Search excludes archived by default; includeArchived: true overrides.
+   * Failure throws directly, no fallback.
    */
   async archive(id: string): Promise<void> {
     if (this.closed) throw new Error("MilvusSearchManager is closed");
@@ -919,21 +910,21 @@ export class MilvusSearchManager {
     });
   }
 
-  // ── 写入（MemoryDataBackend.write） ───────────────────────────
+  // ── Write (MemoryDataBackend.write) ─────────────────────────
 
   /**
-   * 写入一条记忆到 Milvus。
+   * Write a memory entry to Milvus.
    *
-   * 流程：
-   * 1. 校验 metadata（sourceLabel / memoryType）
-   * 2. 若 degraded 或健康探测失败 → 走 fallback ndjson 兜底
-   * 3. 健康 → 先回放 fallback 积压条目，再 embed + insert 新条目
-   * 4. 任一环节失败 → 走 fallback，返回占位 MemoryReference
+   * Flow:
+   * 1. Validate metadata (sourceLabel / memoryType)
+   * 2. If degraded or health check fails → ndjson fallback
+   * 3. Otherwise, replay pending fallback entries, then embed + insert
+   * 4. If insert fails → fallback, return placeholder MemoryReference
    */
   async write(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
     if (this.closed) throw new Error("MilvusSearchManager is closed");
 
-    // 组装元数据
+    // Assemble metadata
     const label = (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT;
     assertValidSourceLabel(label);
     const memoryType = entry.memoryType ?? MEMORY_TYPES.SHORT_TERM;
@@ -943,7 +934,7 @@ export class MilvusSearchManager {
       text: entry.text,
       snippet: entry.snippet ?? entry.text.slice(0, 200),
       agentId: entry.agentId ?? this.agentId,
-      sessionKey: entry.sessionKey, // TODO(Task 16): Host 注入默认 sessionKey
+      sessionKey: entry.sessionKey,
       memoryType,
       recallCount: entry.recallCount ?? 0,
       createdAt: entry.createdAt ?? new Date().toISOString(),
@@ -951,12 +942,12 @@ export class MilvusSearchManager {
       provenance: { kind: entry.provenance?.kind ?? "milvus", label },
     };
 
-    // degraded 或健康探测失败 → 直接 fallback
+    // Degraded or health check failed → fallback
     if (this.degraded || !(await this.healthCheck())) {
       return this.fallbackWrite(fullEntry);
     }
 
-    // 健康路径：先回放 fallback 积压
+    // Healthy path: replay pending fallback first
     try {
       await replayFallback(this.workspaceDir, async (fb) => {
         await this.insertEntry(fb);
@@ -968,7 +959,7 @@ export class MilvusSearchManager {
       );
     }
 
-    // 写入新条目
+    // Write new entry
     try {
       const ref = await this.insertEntry(fullEntry);
       return ref;
@@ -982,11 +973,11 @@ export class MilvusSearchManager {
   }
 
   /**
-   * embed + insert 一条 MemoryEntry 到 Milvus。
-   * 返回 MemoryReference（id 为 Milvus 自增主键）。
+   * Embed + insert a single MemoryEntry into Milvus.
+   * Returns a MemoryReference (id is the Milvus auto-increment PK).
    *
-   * 入库前按 content_hash 查重：已存在则直接返回已有记录的 MemoryReference，
-   * 不重新 embed/insert。
+   * Checks content_hash for dedup before insertion — if a matching
+   * entry already exists, returns it without re-embedding/inserting.
    */
   private async insertEntry(
     entry: Omit<MemoryEntry, "id">,
@@ -1010,7 +1001,7 @@ export class MilvusSearchManager {
       data: [data as unknown as RowData],
     });
 
-    // 提取 Milvus 自增主键
+    // Extract Milvus auto-increment PK
     const pk = (result.IDs as NumberArrayId)?.int_id?.data?.[0];
     const idStr = pk != null ? String(pk) : `milvus:${Date.now()}`;
 
@@ -1026,9 +1017,8 @@ export class MilvusSearchManager {
   }
 
   /**
-   * 按 content_hash 查询是否已存在重复记录。
-   * 存在时返回已有记录的 MemoryReference，否则返回 null。
-   * 存量数据无 content_hash 时靠 provenance_label 兜底不强一致回填。
+   * Check if a duplicate record exists by content_hash.
+   * Returns the existing MemoryReference or null.
    */
   private async findByContentHash(hash: string): Promise<MemoryReference | null> {
     if (!hash) return null;
@@ -1043,14 +1033,14 @@ export class MilvusSearchManager {
         return rowToMemoryReference(response.data[0] as Record<string, unknown>);
       }
     } catch {
-      // 查重失败不阻塞写入
+      // Dedup check failure should not block writes
     }
     return null;
   }
 
-  // ── 健康探测 ──────────────────────────────────────────────────
+  // ── Health probe ────────────────────────────────────────────────
 
-  /** 轻量 Milvus 健康探测（describe_collection） */
+  /** Lightweight Milvus health probe (describe_collection). */
   private async healthCheck(): Promise<boolean> {
     try {
       await this.client.describeCollection({
@@ -1062,9 +1052,9 @@ export class MilvusSearchManager {
     }
   }
 
-  // ── 写入兜底 ──────────────────────────────────────────────────
+  // ── Write fallback ──────────────────────────────────────────────
 
-  /** 写入 NDJSON fallback，返回占位 MemoryReference */
+  /** Write to NDJSON fallback; return placeholder MemoryReference. */
   private async fallbackWrite(
     entry: Omit<MemoryEntry, "id">,
   ): Promise<MemoryReference> {
@@ -1083,14 +1073,13 @@ export class MilvusSearchManager {
     };
   }
 
-  // ── recordRecall 正式实现 ───────────────────────────────────
+  // ── recordRecall ─────────────────────────────────────────
 
   /**
-   * 批量更新召回计数：query 取当前字段 → 内存累加 recall_count + 写入
-   * last_recalled_at → upsert 回 Milvus。
+   * Batch update recall counts: query current fields → increment
+   * recall_count + set last_recalled_at → upsert back to Milvus.
    *
-   * 失败策略（§12.7）：失败直接 warnOnce 丢弃，不走 fallback（召回埋点可丢）。
-   * 不触发时机：空 refs 短路 / degraded 跳过 / closed 抛错。
+   * Failure policy: warns once and discards (recall tracking is best-effort).
    */
   async recordRecall(
     refs: MemoryReference[],
@@ -1111,7 +1100,7 @@ export class MilvusSearchManager {
     if (!ids.length) return;
 
     try {
-      // Step 1: query 当前字段（agent 隔离）
+      // Step 1: query current fields (agent isolation)
       const queryResponse = await this.client.query({
         collection_name: this.collectionName,
         filter: `id in [${ids.join(",")}] && ${FIELD_AGENT_ID} == "${this.agentId.replace(/"/g, '\\"')}"`,
@@ -1140,7 +1129,7 @@ export class MilvusSearchManager {
 
       const now = new Date().toISOString();
 
-      // Step 2: 内存累加 recall_count + last_recalled_at
+      // Step 2: increment recall_count + set last_recalled_at
       const upsertRows: Record<string, unknown>[] = [];
       for (const id of ids) {
         const existing = existingMap.get(id);
@@ -1155,7 +1144,7 @@ export class MilvusSearchManager {
           [FIELD_UPDATED_AT]: now,
         };
 
-        // 保留现有字段值（upsert 需提供全部字段，否则可能被清空）
+        // Preserve existing field values (upsert requires full rows to avoid clearing fields)
         if (existing) {
           row[FIELD_TEXT] = existing[FIELD_TEXT];
           row[FIELD_SNIPPET] = existing[FIELD_SNIPPET];
@@ -1171,7 +1160,7 @@ export class MilvusSearchManager {
         upsertRows.push(row);
       }
 
-      // Step 3: 单次 upsert 写入
+      // Step 3: single upsert
       await this.client.upsert({
         collection_name: this.collectionName,
         data: upsertRows as unknown as RowData[],
@@ -1184,7 +1173,7 @@ export class MilvusSearchManager {
     }
   }
 
-  // ── Promotion（Deep Dreaming） ──────────────────────────────
+  // ── Promotion (Deep Dreaming) ────────────────────────────
 
   /**
    * Apply promotions: write new long_term entries for each candidate,
@@ -1376,7 +1365,7 @@ export class MilvusSearchManager {
     return candidates.slice(0, limit);
   }
 
-  // ── 状态 ──────────────────────────────────────────────────────
+  // ── Status ────────────────────────────────────────────────────
 
   status(): MemoryProviderStatus {
     return {
@@ -1395,7 +1384,7 @@ export class MilvusSearchManager {
     };
   }
 
-  // ── 探测 ──────────────────────────────────────────────────────
+  // ── Probes ────────────────────────────────────────────────────
 
   async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
     try {
@@ -1423,7 +1412,7 @@ export class MilvusSearchManager {
     }
   }
 
-  // ── 生命周期 ──────────────────────────────────────────────────
+  // ── Lifecycle ──────────────────────────────────────────────────
 
   async close(): Promise<void> {
     if (this.closed) return;
@@ -1431,11 +1420,9 @@ export class MilvusSearchManager {
   }
 }
 
-// ── 工厂函数 ───────────────────────────────────────────────────────
+// ── Factory ────────────────────────────────────────────────────────
 
-/**
- * 创建 MilvusClient 实例
- */
+/** Create a MilvusClient instance. */
 export function createMilvusClient(host: string, port: number): MilvusClient {
   const address = host.includes(":") ? host : `${host}:${port}`;
   return new MilvusClient(address);

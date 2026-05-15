@@ -1,19 +1,10 @@
-/**
- * memory-milvus memory_get 工具
- *
- * 依据：1-plan.md §Task 11 Step 2 + 2-decisions.md §14
- *
- * - Schema 与 memory-core MemoryGetSchema 一对一
- * - 实际仅用 id 参数，path/from/lines/corpus 占位忽略
- * - 调 manager.get(id) 返回 MemoryEntry
- * - 不触发 recordRecall
- */
+/** `memory_get` tool for the Milvus backend — retrieves a full entry by PK id. */
 
 import { jsonResult } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryEntry } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
-// ── Schema ──────────────────────────────────────────────────────
+// ── Schema ────────────────────────────────────────────────────────
 
 const MEMORY_GET_SCHEMA = {
   type: "object" as const,
@@ -42,14 +33,14 @@ const MEMORY_GET_SCHEMA = {
   },
 };
 
-// ── Description ─────────────────────────────────────────────────
+// ── Description ───────────────────────────────────────────────────
 
 const MEMORY_GET_DESCRIPTION =
   "Retrieve a specific memory entry by its id. " +
   "Returns the full entry text and metadata. " +
   "Only the 'id' parameter is used by the milvus backend.";
 
-// ── Deps ────────────────────────────────────────────────────────
+// ── Deps ──────────────────────────────────────────────────────────
 
 export interface MemoryGetToolDeps {
   getManager: () => {
@@ -57,7 +48,7 @@ export interface MemoryGetToolDeps {
   } | null;
 }
 
-// ── Factory ─────────────────────────────────────────────────────
+// ── Factory ───────────────────────────────────────────────────────
 
 export function createMemoryGetTool(deps: MemoryGetToolDeps): AnyAgentTool {
   return {

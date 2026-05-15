@@ -1,17 +1,10 @@
-/**
- * memory-milvus 工具注册
- *
- * 依据：1-plan.md §S5 + 2-decisions.md §12.3/12.9
- *
- * memory_write 工具：将 AI flush turn 提取的记忆写入 Milvus。
- * 统一走 MemorySearchManager.write()，degraded/健康探测失败/fatal → fallback 兜底。
- */
+/** `memory_write` tool for the Milvus backend. */
 
 import { jsonResult } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { assertValidSourceLabel, MEMORY_SOURCE_LABELS, type MemorySourceLabel } from "./types.js";
 
-/** 工具返回的公开 payload 类型 */
+/** Public payload returned by memory_write. */
 export interface MemoryWriteResult {
   id: string;
   label: MemorySourceLabel;
@@ -40,18 +33,15 @@ const MEMORY_WRITE_SCHEMA = {
   required: ["text"],
 };
 
-// ── 工厂 ──────────────────────────────────────────────────────────
+// ── Factory ────────────────────────────────────────────────────────
 
 export interface MemoryWriteToolDeps {
-  /** 获取当前活跃的 search manager（可能为 null，如插件未初始化完成） */
   getManager: () => { write(entry: { text: string; provenance?: { label?: string } }): Promise<{ id: string; provenance?: { label?: string } }> } | null;
 }
 
 /**
- * 创建 memory_write 工具。
- *
- * 工具通过闭包持有 getManager 引用，避免循环导入。
- * 管理器未初始化时返回明确错误，不抛异常。
+ * Create the memory_write tool.
+ * Uses a closure over getManager to avoid circular imports.
  */
 export function createMemoryWriteTool(deps: MemoryWriteToolDeps): AnyAgentTool {
   return {

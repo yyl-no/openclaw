@@ -17,9 +17,9 @@ function parseResult(raw: unknown): Record<string, unknown> {
 // ── Tests ─────────────────────────────────────────────────────────
 
 describe("memory_write tool", () => {
-  // ── 成功路径 ──────────────────────────────────────────────────
+  // ── Happy path ───────────────────────────────────────────────
 
-  it("合法 label + 有效 text → 写入成功，返回 id 和 label", async () => {
+  it("valid label + valid text → write succeeds, returns id and label", async () => {
     const writeSpy = vi.fn().mockResolvedValue({
       id: "42",
       provenance: { label: "chat_extract" },
@@ -40,7 +40,7 @@ describe("memory_write tool", () => {
     expect(payload.label).toBe("chat_extract");
   });
 
-  it("不传 label 时默认 chat_extract", async () => {
+  it("defaults label to chat_extract when not provided", async () => {
     const writeSpy = vi.fn().mockResolvedValue({
       id: "99",
       provenance: { label: "chat_extract" },
@@ -60,9 +60,9 @@ describe("memory_write tool", () => {
     expect(payload.id).toBe("99");
   });
 
-  // ── 校验失败 ──────────────────────────────────────────────────
+  // ── Validation failures ──────────────────────────────────────
 
-  it("非法 label 返回错误，不调用 manager.write", async () => {
+  it("invalid label returns error, does not call manager.write", async () => {
     const writeSpy = vi.fn();
     const tool = createMemoryWriteTool({
       getManager: () => ({ write: writeSpy }),
@@ -76,7 +76,7 @@ describe("memory_write tool", () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
-  it("text 为空字符串返回错误", async () => {
+  it("empty text string returns error", async () => {
     const writeSpy = vi.fn();
     const tool = createMemoryWriteTool({
       getManager: () => ({ write: writeSpy }),
@@ -90,7 +90,7 @@ describe("memory_write tool", () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
-  it("text 缺失返回错误", async () => {
+  it("missing text returns error", async () => {
     const writeSpy = vi.fn();
     const tool = createMemoryWriteTool({
       getManager: () => ({ write: writeSpy }),
@@ -104,9 +104,9 @@ describe("memory_write tool", () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
-  // ── Manager 不可用 ────────────────────────────────────────────
+  // ── Manager unavailable ──────────────────────────────────────
 
-  it("manager 为 null 时返回初始化错误", async () => {
+  it("returns initialization error when manager is null", async () => {
     const tool = createMemoryWriteTool({
       getManager: () => null,
     });
@@ -118,9 +118,9 @@ describe("memory_write tool", () => {
     expect(payload.error).toContain("not initialized");
   });
 
-  // ── Manager write 内部异常 ────────────────────────────────────
+  // ── Manager write internal error ──────────────────────────────
 
-  it("manager.write 抛错时返回错误，不抛未捕获异常", async () => {
+  it("returns error when manager.write throws, no uncaught exception", async () => {
     const writeSpy = vi.fn().mockRejectedValue(new Error("Milvus connection lost"));
     const tool = createMemoryWriteTool({
       getManager: () => ({ write: writeSpy }),
@@ -133,9 +133,9 @@ describe("memory_write tool", () => {
     expect(payload.error).toBe("Milvus connection lost");
   });
 
-  // ── user_manual 标签 ──────────────────────────────────────────
+  // ── user_manual label ────────────────────────────────────────
 
-  it("user_manual label 写入成功", async () => {
+  it("user_manual label writes successfully", async () => {
     const writeSpy = vi.fn().mockResolvedValue({
       id: "77",
       provenance: { label: "user_manual" },
@@ -155,9 +155,9 @@ describe("memory_write tool", () => {
     expect(payload.label).toBe("user_manual");
   });
 
-  // ── 确保不覆盖内置结果字段 ────────────────────────────────────
+  // ── Ensure built-in result fields are not overwritten ────────
 
-  it("返回结构不含额外字段", async () => {
+  it("result structure contains no extra fields", async () => {
     const writeSpy = vi.fn().mockResolvedValue({ id: "1", provenance: { label: "import" } });
     const tool = createMemoryWriteTool({
       getManager: () => ({ write: writeSpy }),

@@ -1,9 +1,4 @@
-/**
- * Key-based 去重 console.warn helper。
- *
- * 同一个 key 只 warn 一次，避免刷屏。
- * 用于 degraded / corpus 不支持 / citation 缺失等一次性提醒。
- */
+/** Deduplicated console.warn helper — each key fires at most once. */
 
 const warnedKeys = new Set<string>();
 

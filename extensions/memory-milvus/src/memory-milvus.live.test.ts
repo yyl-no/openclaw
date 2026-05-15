@@ -1,11 +1,11 @@
 /**
- * memory-milvus live 端到端测试
+ * memory-milvus live end-to-end tests
  *
- * 禁止 CI 自动运行，需要：
- * 1. 本地启动 Milvus（`docker run -d -p 19530:19530 milvusdb/milvus:v2.4.0 standalone`）
- * 2. 设置 embedding API key（OPENAI_API_KEY 或对应 provider 的环境变量）
+ * CI auto-run is disabled. Prerequisites:
+ * 1. Local Milvus running (`docker run -d -p 19530:19530 milvusdb/milvus:v2.4.0 standalone`)
+ * 2. Set embedding API key (OPENAI_API_KEY or corresponding provider env var)
  *
- * 运行：OPENCLAW_LIVE_TEST=1 pnpm test:live extensions/memory-milvus
+ * Run: OPENCLAW_LIVE_TEST=1 pnpm test:live extensions/memory-milvus
  */
 
 import { describe, expect, it } from "vitest";
@@ -77,7 +77,7 @@ async function createLiveManager(client: ReturnType<typeof createMilvusClient>) 
 }
 
 describeLive("memory-milvus live E2E", () => {
-  it("write → 写入一条记忆并断言返回值", async () => {
+  it("write → writes a memory entry and asserts return value", async () => {
     const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
@@ -99,7 +99,7 @@ describeLive("memory-milvus live E2E", () => {
     }
   });
 
-  it("write → search 命中 → recordRecall 累加", async () => {
+  it("write → search hit → recordRecall accumulates", async () => {
     const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
@@ -137,7 +137,7 @@ describeLive("memory-milvus live E2E", () => {
     }
   });
 
-  it("promotion 全链路：rank → apply → 新 long_term + 原记录 archived", async () => {
+  it("promotion full pipeline: rank → apply → new long_term + original archived", async () => {
     const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
@@ -205,7 +205,7 @@ describeLive("memory-milvus live E2E", () => {
     }
   });
 
-  it("get → 按 id 读取完整 MemoryEntry", async () => {
+  it("get → reads full MemoryEntry by id", async () => {
     const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,

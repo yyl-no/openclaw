@@ -1,46 +1,20 @@
-/**
- * Milvus Collection Schema 定义
- *
- * 依据：1-plan.md §Task8 + 2-decisions.md §9
- *
- * 与 MemoryEntry / MemoryReference 的字段映射：
- * ┌──────────────────────┬─────────────────────┬──────────────────────┐
- * │ Milvus 字段           │ MemoryEntry          │ MemoryReference       │
- * ├──────────────────────┼─────────────────────┼──────────────────────┤
- * │ id (Int64, PK)       │ id (string)          │ id (string)          │
- * │ embedding (1024维)    │ — (内部使用)          │ — (内部使用)          │
- * │ text (VarChar 64KB)  │ text                 │ —                    │
- * │ snippet (VarChar 4KB)│ snippet              │ snippet              │
- * │ agent_id             │ agentId              │ —                    │
- * │ session_key          │ sessionKey           │ —                    │
- * │ memory_type          │ memoryType           │ —                    │
- * │ recall_count         │ recallCount          │ —                    │
- * │ provenance_kind      │ provenance.kind      │ provenance.kind      │
- * │ provenance_label     │ provenance.label     │ provenance.label     │
- * │ created_at           │ createdAt            │ —                    │
- * │ updated_at           │ updatedAt            │ —                    │
- * │ last_recalled_at     │ —                    │ — (内部使用)          │
- * │ content_hash         │ — (内部使用)          │ — (内部使用)          │
- * │ sparse_bm25          │ — (内部使用)          │ — (内部使用)          │
- * │ score                │ —                    │ score (运行时计算)     │
- * └──────────────────────┴─────────────────────┴──────────────────────┘
- */
+/** Milvus collection schema definition and row-type mappers. */
 
 import { createHash } from "node:crypto";
 import type { MemoryEntry, MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 
-// ── 内容哈希 ──────────────────────────────────────────────────────
+// ── Content hash ──────────────────────────────────────────────────
 
 /**
- * 计算内容去重哈希：SHA-256(text + "\0" + provenance_label)。
- * provenance_label 为 undefined 时用空字符串。
+ * Compute SHA-256 content dedup hash: SHA-256(text + "\0" + provenance_label).
+ * provenance_label defaults to empty string when undefined.
  */
 export function computeContentHash(text: string, provenanceLabel?: string): string {
   const label = provenanceLabel ?? "";
   return createHash("sha256").update(`${text}\0${label}`).digest("hex");
 }
 
-// ── Milvus 字段名常量 ──────────────────────────────────────────────
+// ── Field name constants ───────────────────────────────────────────
 
 export const FIELD_ID = "id";
 export const FIELD_EMBEDDING = "embedding";
@@ -58,7 +32,7 @@ export const FIELD_LAST_RECALLED_AT = "last_recalled_at";
 export const FIELD_CONTENT_HASH = "content_hash";
 export const FIELD_SPARSE_BM25 = "sparse_bm25";
 
-/** 所有字段名集合（不含内部向量字段 embedding / sparse_bm25） */
+/** All schema field names (including internal vector fields). */
 export const ALL_SCHEMA_FIELDS = [
   FIELD_ID,
   FIELD_EMBEDDING,
@@ -76,66 +50,66 @@ export const ALL_SCHEMA_FIELDS = [
   FIELD_CONTENT_HASH,
 ] as const;
 
-// ── Schema 配置常量 ────────────────────────────────────────────────
+// ── Schema config constants ────────────────────────────────────────
 
-/** 默认 Collection 名称 */
+/** Default collection name */
 export const DEFAULT_COLLECTION_NAME = "openclaw_memory";
 
-/** 默认 embedding 维度（阿里云 text-embedding-v3） */
+/** Default embedding dimension (text-embedding-v3) */
 export const DEFAULT_EMBEDDING_DIM = 1024;
 
-/** Milvus 默认 gRPC 端口 */
+/** Default Milvus gRPC port */
 export const DEFAULT_MILVUS_PORT = 19530;
 
-/** text 字段最大长度 */
+/** text field max length (64KB) */
 export const TEXT_MAX_LENGTH = 65536;
 
-/** snippet 字段最大长度 */
+/** snippet field max length (4KB) */
 export const SNIPPET_MAX_LENGTH = 4096;
 
-/** agent_id 字段最大长度 */
+/** agent_id field max length */
 export const AGENT_ID_MAX_LENGTH = 256;
 
-/** session_key 字段最大长度 */
+/** session_key field max length */
 export const SESSION_KEY_MAX_LENGTH = 512;
 
-/** memory_type 字段最大长度 */
+/** memory_type field max length */
 export const MEMORY_TYPE_MAX_LENGTH = 32;
 
-/** provenance_kind 字段最大长度 */
+/** provenance_kind field max length */
 export const PROVENANCE_KIND_MAX_LENGTH = 32;
 
-/** provenance_label 字段最大长度 */
+/** provenance_label field max length */
 export const PROVENANCE_LABEL_MAX_LENGTH = 1024;
 
-/** content_hash 字段最大长度（SHA-256 hex） */
+/** content_hash field max length (SHA-256 hex = 64 chars) */
 export const CONTENT_HASH_MAX_LENGTH = 64;
 
-/** BM25 稀疏向量字段（SparseFloatVector，Milvus ≥ 2.4 BM25 Function） */
+/** BM25 sparse vector field description */
 export const BM25_FIELD_DESCRIPTION = "BM25 sparse vector (requires server-side BM25 Function)";
 
-/** 时间戳字段最大长度（ISO 8601 格式） */
+/** Timestamp field max length (ISO 8601) */
 export const TIMESTAMP_MAX_LENGTH = 32;
 
-// ── 输出字段子集（不含 embedding）──────────────────────────────────
+// ── Output field subset (excludes embedding to reduce wire size) ───
 
-/** search 返回时不需要的字段（排除 embedding 以减小传输） */
+/** Fields returned by search — embedding is excluded. */
 export const OUTPUT_FIELDS = ALL_SCHEMA_FIELDS.filter(
   (f) => f !== FIELD_EMBEDDING,
 );
 
-// ── 类型映射辅助 ──────────────────────────────────────────────────
+// ── Type mappers ──────────────────────────────────────────────────
 
 /**
- * Milvus 行数据 → MemoryReference
- * 用于 search 结果映射。
+ * Map a Milvus row to a MemoryReference.
+ * Score is left at 0 — the search layer sets it at runtime.
  */
 export function rowToMemoryReference(row: Record<string, unknown>): MemoryReference {
   const id = String(row[FIELD_ID] ?? "");
   return {
     id,
     snippet: String(row[FIELD_SNIPPET] ?? ""),
-    score: 0, // 由搜索层在运行时设置
+    score: 0,
     provenance: {
       kind: (String(row[FIELD_PROVENANCE_KIND] ?? "milvus")) as "milvus",
       label: String(row[FIELD_PROVENANCE_LABEL] ?? `Milvus #${id}`),
@@ -144,8 +118,8 @@ export function rowToMemoryReference(row: Record<string, unknown>): MemoryRefere
 }
 
 /**
- * Milvus 行数据 → MemoryEntry
- * 用于 get(id) 结果映射。
+ * Map a Milvus row to a MemoryEntry.
+ * Used for get(id) result mapping.
  */
 export function rowToMemoryEntry(row: Record<string, unknown>): MemoryEntry {
   const id = String(row[FIELD_ID] ?? "");
@@ -173,8 +147,8 @@ export function rowToMemoryEntry(row: Record<string, unknown>): MemoryEntry {
 }
 
 /**
- * MemoryEntry (不含 id) → Milvus insert 数据对象
- * 返回纯 JSON 对象，embedding 由调用方在 insert 前附加。
+ * Map a MemoryEntry (without id) to a Milvus insert data object.
+ * The embedding vector is attached by the caller before insert.
  */
 export function entryToInsertData(
   entry: Omit<MemoryEntry, "id">,

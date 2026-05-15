@@ -30,13 +30,13 @@ function makeEntry(overrides: Partial<TestEntry> = {}): TestEntry {
   };
 }
 
-/** 创建临时 workspace 目录 */
+/** Create a temporary workspace directory */
 async function tempWorkspace(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "milvus-fallback-"));
   return dir;
 }
 
-/** 读取 fallback 目录下的所有 ndjson 行 */
+/** Read all ndjson lines from the fallback directory */
 async function readAllFallbackLines(workspaceDir: string): Promise<string[]> {
   const dir = path.join(workspaceDir, FALLBACK_DIR);
   try {
@@ -54,25 +54,25 @@ async function readAllFallbackLines(workspaceDir: string): Promise<string[]> {
   }
 }
 
-// ── 场景 1: 写入 → 回放成功 → 文件清空 ─────────────────────────────
+// ── Scenario 1: Write → replay success → file cleared ────────────
 
-describe("writeFallback + replayFallback: 成功路径", () => {
-  it("写入 3 条 entry → 回放全部成功 → 文件清空 → count 归零", async () => {
+describe("writeFallback + replayFallback: success path", () => {
+  it("writes 3 entries → all replayed successfully → file cleared → count 0", async () => {
     const ws = await tempWorkspace();
 
     const e1 = makeEntry({ text: "memory A" });
     const e2 = makeEntry({ text: "memory B" });
     const e3 = makeEntry({ text: "memory C" });
 
-    // 写入 3 条
+    // Write 3 entries
     await writeFallback(ws, e1);
     await writeFallback(ws, e2);
     await writeFallback(ws, e3);
 
-    // 确认 3 条在 fallback 中
+    // Confirm 3 entries are in fallback
     expect(await pendingFallbackCount(ws)).toBe(3);
 
-    // 回放：全部成功
+    // Replay: all succeed
     const replayed: TestEntry[] = [];
     const count = await replayFallback(ws, async (entry) => {
       replayed.push(entry);
@@ -84,19 +84,19 @@ describe("writeFallback + replayFallback: 成功路径", () => {
     expect(replayed[1]!.text).toBe("memory B");
     expect(replayed[2]!.text).toBe("memory C");
 
-    // 文件应被删除（空文件清理）
+    // File should be deleted (empty file cleanup)
     expect(await pendingFallbackCount(ws)).toBe(0);
     expect(await readAllFallbackLines(ws)).toHaveLength(0);
 
-    // 清理
+    // Cleanup
     await fs.rm(ws, { recursive: true, force: true });
   });
 });
 
-// ── 场景 2: 写入 → 回放部分失败 → 失败条目保留 ─────────────────────
+// ── Scenario 2: Write → replay partial failure → failed entries kept ──
 
-describe("writeFallback + replayFallback: 部分失败", () => {
-  it("写入 4 条 → 第 2 条回放失败 → 仅第 2 条保留在文件中", async () => {
+describe("writeFallback + replayFallback: partial failure", () => {
+  it("writes 4 entries → 2nd replay fails → only 2nd retained in file", async () => {
     const ws = await tempWorkspace();
 
     const e1 = makeEntry({ text: "memory A" });
@@ -121,18 +121,18 @@ describe("writeFallback + replayFallback: 部分失败", () => {
       replayed.push(entry);
     });
 
-    // 3 条成功，1 条失败
+    // 3 succeeded, 1 failed
     expect(count).toBe(3);
     expect(callCount).toBe(4);
     expect(replayed).toHaveLength(3);
 
-    // 失败条目保留
+    // Failed entry retained
     expect(await pendingFallbackCount(ws)).toBe(1);
     const remaining = await readAllFallbackLines(ws);
     expect(remaining).toHaveLength(1);
     expect(remaining[0]).toContain("memory B - will fail");
 
-    // 第二轮回放：这次全部成功
+    // Second round: all succeed this time
     const round2: TestEntry[] = [];
     const count2 = await replayFallback(ws, async (entry) => {
       round2.push(entry);
@@ -145,10 +145,10 @@ describe("writeFallback + replayFallback: 部分失败", () => {
   });
 });
 
-// ── 场景 3: 空目录不抛错 ──────────────────────────────────────────
+// ── Scenario 3: Empty directory does not throw ────────────────────
 
-describe("fallback: 空目录", () => {
-  it("无 fallback 文件时 replayFallback 返回 0", async () => {
+describe("fallback: empty directory", () => {
+  it("replayFallback returns 0 when no fallback files exist", async () => {
     const ws = await tempWorkspace();
     const count = await replayFallback(ws, async () => {
       throw new Error("should not be called");
@@ -157,17 +157,17 @@ describe("fallback: 空目录", () => {
     await fs.rm(ws, { recursive: true, force: true });
   });
 
-  it("无 fallback 文件时 pendingFallbackCount 返回 0", async () => {
+  it("pendingFallbackCount returns 0 when no fallback files exist", async () => {
     const ws = await tempWorkspace();
     expect(await pendingFallbackCount(ws)).toBe(0);
     await fs.rm(ws, { recursive: true, force: true });
   });
 });
 
-// ── 场景 4: 并发写入不交错 ─────────────────────────────────────────
+// ── Scenario 4: Concurrent writes do not interleave ──────────────
 
-describe("writeFallback: 并发安全", () => {
-  it("10 条并发写入后所有条目均可正确读取", async () => {
+describe("writeFallback: concurrency safety", () => {
+  it("10 concurrent writes, all entries readable correctly", async () => {
     const ws = await tempWorkspace();
 
     const entries = Array.from({ length: 10 }, (_, i) =>
@@ -178,7 +178,7 @@ describe("writeFallback: 并发安全", () => {
 
     expect(await pendingFallbackCount(ws)).toBe(10);
 
-    // 回放全部
+    // Replay all
     const replayed: string[] = [];
     await replayFallback(ws, async (entry) => {
       replayed.push(entry.text);
@@ -193,15 +193,15 @@ describe("writeFallback: 并发安全", () => {
   });
 });
 
-// ── 场景 5: 无效 JSON 行被跳过 ──────────────────────────────────
+// ── Scenario 5: Invalid JSON lines skipped ───────────────────────
 
-describe("replayFallback: 脏数据容忍", () => {
-  it("无效 JSON 行在回放时被丢弃不再保留", async () => {
+describe("replayFallback: dirty data tolerance", () => {
+  it("invalid JSON lines discarded during replay, not retained", async () => {
     const ws = await tempWorkspace();
     const dir = path.join(ws, FALLBACK_DIR);
     await fs.mkdir(dir, { recursive: true });
 
-    // 手动写入包含无效行的文件
+    // Manually write a file containing invalid lines
     const filePath = path.join(dir, "2026-05-13.ndjson");
     await fs.writeFile(
       filePath,
@@ -219,26 +219,26 @@ describe("replayFallback: 脏数据容忍", () => {
       replayed.push(entry.text);
     });
 
-    // 仅 2 条有效
+    // Only 2 valid
     expect(count).toBe(2);
     expect(replayed).toEqual(["valid A", "valid B"]);
 
-    // 无效行已丢弃，文件应因全部处理成功而被删除
+    // Invalid lines discarded, file deleted because all processed successfully
     expect(await pendingFallbackCount(ws)).toBe(0);
 
     await fs.rm(ws, { recursive: true, force: true });
   });
 });
 
-// ── 场景 6: 元数据字段保真 ────────────────────────────────────
+// ── Scenario 6: Metadata field fidelity ──────────────────────────
 
-describe("writeFallback + replayFallback: 元数据保真", () => {
-  it("entry 的所有字段在写入 → 回放循环后完全一致", async () => {
+describe("writeFallback + replayFallback: metadata fidelity", () => {
+  it("all entry fields identical after write → replay roundtrip", async () => {
     const ws = await tempWorkspace();
 
     const original = makeEntry({
-      text: "详细记忆内容\n第二行",
-      snippet: "详细记忆...",
+      text: "Detailed memory content\nsecond line",
+      snippet: "Detailed memory...",
       agentId: "agent-xyz",
       sessionKey: "sess-123",
       memoryType: "long_term",

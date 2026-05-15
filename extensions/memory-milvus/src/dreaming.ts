@@ -1,17 +1,15 @@
 /**
- * Dreaming 调度编排 — Milvus 后端
+ * Dreaming orchestration — Milvus backend.
  *
- * 依据：1-plan.md §Task13 + 2-decisions.md §12.3
+ * Mirror of memory-core dreaming.ts, adapted for Milvus:
+ * - gateway_start → reconcile cron job
+ * - before_agent_reply → detect dreaming trigger token → run sweep
+ * - /milvus-dreaming command → manual on/off/status/run
  *
- * 与 memory-core 的 dreaming.ts 同构：
- * - gateway_start → 对账 cron job
- * - before_agent_reply → 检测 dreaming 触发令牌 → 执行 sweep
- * - /dreaming 命令 → 手动启停/运行
- *
- * 差异：
- * - 不走文件系统 recall entry 扫描，改查 Milvus 标量过滤
- * - promotions 通过 manager.applyPromotions() 写入 Milvus
- * - Narrative 暂不生成（deferred），只完成 rank + apply
+ * Differences from memory-core:
+ * - Queries Milvus scalar filters instead of file-system recall scans
+ * - Promotions go through manager.applyPromotions()
+ * - Narrative generation is deferred; only rank + apply are complete
  */
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -32,7 +30,7 @@ function normalizeLowercaseStringOrEmpty(
   return (value ?? "").toLowerCase();
 }
 
-// ── 常量 ──────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────
 
 const MANAGED_DREAMING_CRON_NAME = "milvus:short-term-dreaming";
 const MANAGED_DREAMING_CRON_TAG = "[memory-milvus:dreaming]";
@@ -41,7 +39,7 @@ const DREAMING_SYSTEM_EVENT_TEXT =
   "Use memory_search to find the top short-term recall candidates, " +
   "then apply promotions to graduate them to long-term memory.";
 
-// ── 默认配置 ──────────────────────────────────────────────────────
+// ── Defaults ────────────────────────────────────────────────────────
 
 const DEFAULT_DREAMING_CRON = "0 3 * * *";
 const DEFAULT_DREAMING_LIMIT = 5;
@@ -54,7 +52,7 @@ const STARTUP_CRON_RETRY_DELAY_MS = 250;
 const STARTUP_CRON_RETRY_MAX_ATTEMPTS = 5;
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 30_000;
 
-// ── 类型 ──────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────
 
 type CronServiceLike = {
   list: (opts?: { includeDisabled?: boolean }) => Promise<ManagedCronJobLike[]>;
@@ -115,7 +113,7 @@ type ReconcileResult =
   | { status: "updated"; removed: number }
   | { status: "noop"; removed: number };
 
-// ── Manager resolver（由 index.ts 注入，避免循环 import） ──────
+// ── Manager resolver (injected by index.ts to avoid circular import) ─
 
 type ManagerResolver = (
   cfg: OpenClawConfig,
@@ -130,7 +128,7 @@ export function setDreamingManagerResolver(
   resolveManager = fn;
 }
 
-// ── Config 解析 ───────────────────────────────────────────────────
+// ── Config resolution ───────────────────────────────────────────────
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -172,7 +170,7 @@ export function resolveShortTermPromotionDreamingConfig(params: {
   };
 }
 
-// ── Cron 服务解析 ─────────────────────────────────────────────────
+// ── Cron service resolution ─────────────────────────────────────────
 
 function resolveCronServiceFromCandidate(
   candidate: unknown,
@@ -196,7 +194,7 @@ function resolveCronServiceFromGatewayContext(
   return resolveCronServiceFromCandidate(ctx?.getCron?.());
 }
 
-// ── Cron job 构建 / 检测 ─────────────────────────────────────────
+// ── Cron job build / detect ────────────────────────────────────────
 
 function resolveManagedCronDescription(
   config: ShortTermPromotionDreamingConfig,
@@ -321,7 +319,7 @@ function buildManagedDreamingPatch(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
-// ── Cron 对账 ─────────────────────────────────────────────────────
+// ── Cron reconciliation ────────────────────────────────────────────
 
 async function reconcileShortTermDreamingCronJob(params: {
   cron: CronServiceLike | null;
@@ -397,7 +395,7 @@ async function reconcileShortTermDreamingCronJob(params: {
   return { status: "updated", removed };
 }
 
-// ── Sweep 执行 ────────────────────────────────────────────────────
+// ── Sweep execution ────────────────────────────────────────────────
 
 async function runMilvusDreamingSweep(params: {
   config: ShortTermPromotionDreamingConfig;
@@ -500,7 +498,7 @@ async function runMilvusDreamingSweep(params: {
   };
 }
 
-// ── 令牌检测 ──────────────────────────────────────────────────────
+// ── Token detection ─────────────────────────────────────────────────
 
 function includesSystemEventToken(
   cleanedBody: string,
@@ -509,7 +507,7 @@ function includesSystemEventToken(
   return cleanedBody.includes(eventText);
 }
 
-// ── 命令处理 ──────────────────────────────────────────────────────
+// ── Command handling ────────────────────────────────────────────────
 
 function formatErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -643,7 +641,7 @@ async function handleDreamingCommand(
   }
 }
 
-// ── 注册入口 ──────────────────────────────────────────────────────
+// ── Register entry ──────────────────────────────────────────────────
 
 export function registerShortTermPromotionDreaming(
   api: OpenClawPluginApi,
@@ -825,7 +823,7 @@ export function registerShortTermPromotionDreaming(
     }, STARTUP_CRON_RETRY_DELAY_MS);
   };
 
-  // ── 生命周期事件 ──────────────────────────────────────────────
+  // ── Lifecycle events ────────────────────────────────────────────
 
   api.on("gateway_start", async (_event, ctx) => {
     disposed = false;
@@ -890,7 +888,7 @@ export function registerShortTermPromotionDreaming(
     return undefined;
   });
 
-  // ── /dreaming 命令 ────────────────────────────────────────────
+  // ── /milvus-dreaming command ──────────────────────────────────
 
   api.registerCommand({
     name: "milvus-dreaming",

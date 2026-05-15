@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createMemorySearchTool, type MemorySearchToolDeps } from "./tools.search.js";
 import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 
-// ── Mock 补充: mock listMemoryCorpusSupplements ─────────────────
+// ── Mock supplements: mock listMemoryCorpusSupplements ────────────
 
 vi.mock("openclaw/plugin-sdk/memory-core-host-runtime-core", async () => {
   const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/memory-core-host-runtime-core")>(
@@ -46,10 +46,10 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-// ── Schema 守护 ───────────────────────────────────────────────────
+// ── Schema guard ─────────────────────────────────────────────────
 
 describe("memory_search tool: schema", () => {
-  it("schema 字段集与 memory-core MemorySearchSchema 一致", () => {
+  it("schema field set matches memory-core MemorySearchSchema", () => {
     const tool = createMemorySearchTool(makeDeps());
     const props = (tool.parameters as { properties: Record<string, unknown> }).properties;
     const fieldNames = Object.keys(props).sort();
@@ -57,17 +57,17 @@ describe("memory_search tool: schema", () => {
   });
 });
 
-// ── 参数校验 ─────────────────────────────────────────────────────
+// ── Parameter validation ────────────────────────────────────────
 
-describe("memory_search tool: 参数校验", () => {
-  it("query 为空字符串返回错误", async () => {
+describe("memory_search tool: parameter validation", () => {
+  it("returns error for empty query string", async () => {
     const tool = createMemorySearchTool(makeDeps());
     const result = await tool.execute("call-1", { query: "" }, undefined);
     const payload = parseResult(result);
     expect(payload.error).toContain("query is required");
   });
 
-  it("query 缺失返回错误", async () => {
+  it("returns error when query is missing", async () => {
     const tool = createMemorySearchTool(makeDeps());
     const result = await tool.execute("call-1", {}, undefined);
     const payload = parseResult(result);
@@ -75,10 +75,10 @@ describe("memory_search tool: 参数校验", () => {
   });
 });
 
-// ── corpus 路由 ──────────────────────────────────────────────────
+// ── Corpus routing ─────────────────────────────────────────────
 
-describe("memory_search tool: corpus 路由", () => {
-  it("corpus=memory → 调用 manager.search 并返回结果", async () => {
+describe("memory_search tool: corpus routing", () => {
+  it("corpus=memory calls manager.search and returns results", async () => {
     const searchSpy = vi.fn().mockResolvedValue([
       makeRef({ id: "1", snippet: "Memory hit" }),
     ]);
@@ -102,7 +102,7 @@ describe("memory_search tool: corpus 路由", () => {
     expect(payload.corpus).toBe("memory");
   });
 
-  it("corpus 未传 → 默认 memory，正常搜索", async () => {
+  it("defaults corpus to memory when not provided", async () => {
     const searchSpy = vi.fn().mockResolvedValue([makeRef()]);
     const tool = createMemorySearchTool(
       makeDeps({ getManager: () => ({ search: searchSpy }) }),
@@ -119,7 +119,7 @@ describe("memory_search tool: corpus 路由", () => {
     expect(payload.corpus).toBe("memory");
   });
 
-  it("corpus=sessions → 搜索 milvus（sessionKey 过滤）, 输出 corpus=sessions", async () => {
+  it("corpus=sessions searches milvus with sessionKey filter, outputs corpus=sessions", async () => {
     const searchSpy = vi.fn().mockResolvedValue([makeRef({ id: "s1" })]);
     const tool = createMemorySearchTool(
       makeDeps({
@@ -144,7 +144,7 @@ describe("memory_search tool: corpus 路由", () => {
     expect(payload.corpus).toBe("sessions");
   });
 
-  it("corpus=wiki → 仅查 supplement（无注册时返回空数组）", async () => {
+  it("corpus=wiki only queries supplements, returns empty when none registered", async () => {
     const searchSpy = vi.fn();
     const tool = createMemorySearchTool(
       makeDeps({ getManager: () => ({ search: searchSpy }) }),
@@ -157,13 +157,13 @@ describe("memory_search tool: corpus 路由", () => {
     );
     const payload = parseResult(result);
 
-    // wiki corpus 不调 milvus
+    // wiki corpus does not call milvus
     expect(searchSpy).not.toHaveBeenCalled();
     expect(payload.results).toEqual([]);
     expect(payload.corpus).toBe("wiki");
   });
 
-  it("corpus=all → milvus + supplement 双路合并，输出 corpus=all", async () => {
+  it("corpus=all merges milvus + supplement results, outputs corpus=all", async () => {
     const searchSpy = vi.fn().mockResolvedValue([makeRef({ id: "m1" })]);
     const tool = createMemorySearchTool(
       makeDeps({ getManager: () => ({ search: searchSpy }) }),
@@ -181,7 +181,7 @@ describe("memory_search tool: corpus 路由", () => {
     expect(payload.corpus).toBe("all");
   });
 
-  it("corpus=wiki 时 manager 为 null 不抛错（wiki 不查 milvus）", async () => {
+  it("corpus=wiki with null manager does not throw (wiki skips milvus)", async () => {
     const tool = createMemorySearchTool({ getManager: () => null });
 
     const result = await tool.execute(
@@ -200,7 +200,7 @@ describe("memory_search tool: corpus 路由", () => {
 // ── recordRecall hook ────────────────────────────────────────────
 
 describe("memory_search tool: recordRecall hook", () => {
-  it("搜索命中后触发 recordRecall，传入 refs 和 context", async () => {
+  it("triggers recordRecall on search hit, passing refs and context", async () => {
     const refs = [makeRef({ id: "1" }), makeRef({ id: "2" })];
     const recallSpy = vi.fn().mockResolvedValue(undefined);
     const tool = createMemorySearchTool(
@@ -217,7 +217,7 @@ describe("memory_search tool: recordRecall hook", () => {
     });
   });
 
-  it("搜索无结果时不触发 recordRecall", async () => {
+  it("does not trigger recordRecall when search has no results", async () => {
     const recallSpy = vi.fn();
     const tool = createMemorySearchTool(
       makeDeps({
@@ -231,7 +231,7 @@ describe("memory_search tool: recordRecall hook", () => {
     expect(recallSpy).not.toHaveBeenCalled();
   });
 
-  it("manager 无 recordRecall 方法时不抛错", async () => {
+  it("does not throw when manager has no recordRecall method", async () => {
     const tool = createMemorySearchTool(
       makeDeps({
         getManager: () => ({ search: vi.fn().mockResolvedValue([makeRef()]) }),
@@ -244,10 +244,10 @@ describe("memory_search tool: recordRecall hook", () => {
   });
 });
 
-// ── Citation 装饰 ────────────────────────────────────────────────
+// ── Citation decoration ─────────────────────────────────────────
 
-describe("memory_search tool: citation 装饰", () => {
-  it("默认 (cfg 未设置, 无 sessionKey) → auto 模式 → direct → 包含 citation", async () => {
+describe("memory_search tool: citation decoration", () => {
+  it("default (no cfg, no sessionKey) → auto mode → direct → includes citation", async () => {
     const ref = makeRef({ id: "1", snippet: "Some memory content", provenance: { kind: "milvus", label: "test_source.md" } });
     const tool = createMemorySearchTool(
       makeDeps({
@@ -263,7 +263,7 @@ describe("memory_search tool: citation 装饰", () => {
     expect(results[0].snippet).toContain("\n\nSource: test_source.md");
   });
 
-  it("cfg.memory.citations='off' → 不装饰 citation", async () => {
+  it("cfg.memory.citations='off' → no citation decoration", async () => {
     const ref = makeRef({ id: "1", snippet: "Some memory content" });
     const tool = createMemorySearchTool(
       makeDeps({
@@ -281,7 +281,7 @@ describe("memory_search tool: citation 装饰", () => {
     expect(results[0].snippet).toBe("Some memory content");
   });
 
-  it("cfg.memory.citations='on' → 强制装饰", async () => {
+  it("cfg.memory.citations='on' → force decoration", async () => {
     const ref = makeRef({ id: "1", snippet: "Forced citation", provenance: { kind: "milvus", label: "force_label" } });
     const tool = createMemorySearchTool(
       makeDeps({
@@ -299,10 +299,10 @@ describe("memory_search tool: citation 装饰", () => {
   });
 });
 
-// ── Manager 不可用 ───────────────────────────────────────────────
+// ── Manager unavailable ─────────────────────────────────────────
 
-describe("memory_search tool: manager 不可用", () => {
-  it("manager 为 null 时返回初始化错误", async () => {
+describe("memory_search tool: manager unavailable", () => {
+  it("returns initialization error when manager is null", async () => {
     const tool = createMemorySearchTool({ getManager: () => null });
 
     const result = await tool.execute("call-1", { query: "test" }, undefined);
@@ -312,10 +312,10 @@ describe("memory_search tool: manager 不可用", () => {
   });
 });
 
-// ── Manager 内部异常 ─────────────────────────────────────────────
+// ── Manager internal error ─────────────────────────────────────
 
-describe("memory_search tool: manager 内部异常", () => {
-  it("manager.search 抛错时返回错误，不抛未捕获异常", async () => {
+describe("memory_search tool: manager internal error", () => {
+  it("returns error when manager.search throws, no uncaught exception", async () => {
     const tool = createMemorySearchTool(
       makeDeps({
         getManager: () => ({ search: vi.fn().mockRejectedValue(new Error("Search timeout")) }),

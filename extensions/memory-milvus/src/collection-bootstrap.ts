@@ -1,11 +1,4 @@
-/**
- * Milvus Collection 生命周期管理
- *
- * 依据：1-plan.md §Task10-S2 + 2-decisions.md §12.1/12.6
- *
- * Eager init 原子化三步：create_collection → create_index → load_collection
- * 每步幂等，已存在不视作错误。
- */
+/** Milvus collection lifecycle — eager init with idempotent create/index/load steps. */
 
 import { MilvusClient, type ResStatus, type DescribeCollectionResponse } from "@zilliz/milvus2-sdk-node";
 import type { FieldType } from "@zilliz/milvus2-sdk-node/dist/milvus/types/Collection.js";
@@ -39,17 +32,16 @@ import {
 
 // ── Config ────────────────────────────────────────────────────────
 
-/** Collection 初始化配置，HNSW 参数从插件 config 读取 */
+/** Collection bootstrap configuration — HNSW params read from plugin config. */
 export interface CollectionBootstrapConfig {
-  /** Milvus collection 名称 */
   collectionName: string;
-  /** embedding 向量维度（默认 1024） */
+  /** Embedding vector dimension (default 1024) */
   embeddingDim: number;
-  /** HNSW M 参数（默认 16） */
+  /** HNSW M parameter (default 16) */
   hnswM?: number;
-  /** HNSW efConstruction 参数（默认 200） */
+  /** HNSW efConstruction (default 200) */
   efConstruction?: number;
-  /** 距离度量类型（默认 "COSINE"） */
+  /** Distance metric type (default "COSINE") */
   metricType?: string;
 }
 
@@ -57,15 +49,15 @@ const DEFAULT_HNSW_M = 16;
 const DEFAULT_EF_CONSTRUCTION = 200;
 const DEFAULT_METRIC_TYPE = "COSINE";
 
-// ── Schema 字段定义 ───────────────────────────────────────────────
+// ── Schema field definitions ──────────────────────────────────────
 
-/** 元数据兜底字段名（JSON 类型，用于未来扩展） */
+/** Extensible metadata field (JSON type, for future expansion). */
 const FIELD_METADATA = "metadata";
 
 /**
- * 构建 create_collection 所需的 fields 数组。
- * Task 8 Schema 12 字段 + metadata JSON 兜底字段。
- * 不启用 enable_dynamic_field，保持 schema 可控。
+ * Build the fields array used by create_collection.
+ * 15 fields including metadata JSON fallback.
+ * enable_dynamic_field is off to keep the schema strict.
  */
 function buildCollectionFields(embeddingDim: number): FieldType[] {
   return [
@@ -166,11 +158,11 @@ function buildCollectionFields(embeddingDim: number): FieldType[] {
   ];
 }
 
-// ── 幂等探测辅助 ──────────────────────────────────────────────────
+// ── Idempotent detection helpers ──────────────────────────────────
 
 /**
- * 尝试 describeCollection，不存在则返回 null。
- * catch 所有异常（网络错误、collection 不存在等）统一返回 null。
+ * Try describeCollection; return null if the collection does not exist.
+ * Catches all exceptions (network errors, not-found, etc.) and returns null.
  */
 async function tryDescribe(
   client: MilvusClient,
@@ -184,8 +176,8 @@ async function tryDescribe(
 }
 
 /**
- * 探测 index 是否已在指定字段上存在。
- * 返回已存在的 index 名称，不存在则返回 null。
+ * Check if an index exists on the given field.
+ * Returns the index name if found, null otherwise.
  */
 async function tryDescribeIndex(
   client: MilvusClient,
@@ -206,17 +198,19 @@ async function tryDescribeIndex(
   }
 }
 
-// ── 主入口 ────────────────────────────────────────────────────────
+// ── Main entry ────────────────────────────────────────────────────
 
 /**
- * Eager init：确保 Collection 存在、索引就绪、已加载。
+ * Eager init: ensure the collection exists, indexes are built, and the
+ * collection is loaded into memory.
  *
- * 三步原子化，每步幂等：
- * 1. describe → 不存在则 create
- * 2. describe_index → 不存在则 create_index (HNSW)
- * 3. get_load_state → 未 loaded 则 load
+ * Three idempotent steps:
+ * 1. describe → create if missing
+ * 2. describe_index → create_index (HNSW) if missing
+ * 3. describe_index (sparse) → create_index (SPARSE_INVERTED_INDEX) if missing
+ * 4. get_load_state → load_collection if not loaded
  *
- * 任一步失败抛出异常，由调用方决定降级策略。
+ * Any step may throw; the caller decides degradation strategy.
  */
 export async function ensureCollectionReady(
   client: MilvusClient,
@@ -227,7 +221,7 @@ export async function ensureCollectionReady(
   const ef = config.efConstruction ?? DEFAULT_EF_CONSTRUCTION;
   const metric = config.metricType ?? DEFAULT_METRIC_TYPE;
 
-  // Step 1: Collection — 幂等创建
+  // Step 1: Collection — idempotent create
   const existing = await tryDescribe(client, collectionName);
   if (!existing) {
     const fields = buildCollectionFields(config.embeddingDim);
@@ -243,7 +237,7 @@ export async function ensureCollectionReady(
     }
   }
 
-  // Step 2: Index — 幂等创建 HNSW
+  // Step 2: Index — idempotent HNSW create
   const existingIndex = await tryDescribeIndex(client, collectionName);
   if (!existingIndex) {
     const indexRes: ResStatus = await client.createIndex({
@@ -264,7 +258,7 @@ export async function ensureCollectionReady(
     }
   }
 
-  // Step 3: Sparse index (BM25) — 幂等创建
+  // Step 3: Sparse index (BM25) — idempotent create
   const existingSparseIndex = await tryDescribeIndex(client, collectionName, FIELD_SPARSE_BM25);
   if (!existingSparseIndex) {
     const sparseIndexRes: ResStatus = await client.createIndex({
@@ -282,7 +276,7 @@ export async function ensureCollectionReady(
     }
   }
 
-  // Step 4: Load — 确保 loaded
+  // Step 4: Load — ensure loaded into memory
   const loadState = await client.getLoadState({ collection_name: collectionName });
   if (loadState.state !== "LoadStateLoaded") {
     await client.loadCollection({

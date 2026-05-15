@@ -3,7 +3,7 @@ import pluginEntry from "../index.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 describe("memory-milvus plugin register", () => {
-  it("无条件注册 memory_write / memory_search / memory_get 三个工具", () => {
+  it("unconditionally registers memory_write / memory_search / memory_get three tools", () => {
     const registerToolSpy = vi.fn();
     const mockApi = {
       registerMemoryCapability: vi.fn(),
@@ -15,21 +15,21 @@ describe("memory-milvus plugin register", () => {
 
     expect(registerToolSpy).toHaveBeenCalledTimes(3);
 
-    // 第一次调用：memory_write
+    // 1st call: memory_write
     expect(registerToolSpy).toHaveBeenNthCalledWith(
       1,
       expect.any(Function),
       { names: ["memory_write"] },
     );
 
-    // 第二次调用：memory_search
+    // 2nd call: memory_search
     expect(registerToolSpy).toHaveBeenNthCalledWith(
       2,
       expect.any(Function),
       { names: ["memory_search"] },
     );
 
-    // 第三次调用：memory_get
+    // 3rd call: memory_get
     expect(registerToolSpy).toHaveBeenNthCalledWith(
       3,
       expect.any(Function),
@@ -37,7 +37,7 @@ describe("memory-milvus plugin register", () => {
     );
   });
 
-  it("registerMemoryCapability 也被调用", () => {
+  it("registerMemoryCapability is also called", () => {
     const capabilitySpy = vi.fn();
     const mockApi = {
       registerMemoryCapability: capabilitySpy,

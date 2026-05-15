@@ -1,11 +1,4 @@
-/**
- * Markdown ↔ Milvus 双向迁移工具
- *
- * 依据：1-plan.md §Task14 + 2-decisions.md §12.3/§10.4
- *
- * CLI 形态：`openclaw memory migrate <dir> [--reverse] [--dry-run]`
- * 注册到 memory-milvus 插件的 CLI 钩子，与 memory_write 同插件。
- */
+/** Bidirectional markdown ↔ Milvus migration CLI. */
 
 import { readFile, readdir, mkdir, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -37,40 +30,40 @@ import {
 import { ensureCollectionReady } from "./collection-bootstrap.js";
 import { MEMORY_TYPES } from "./types.js";
 
-// ── 类型定义 ──────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────
 
-/** 迁移结果统计 */
+/** Migration result statistics. */
 export interface MigrationResult {
-  /** 成功插入到 Milvus 的条目数 */
+  /** Entries successfully inserted into Milvus */
   inserted: number;
-  /** 因去重跳过的条目数 */
+  /** Entries skipped due to dedup */
   skipped: number;
-  /** 写入失败的条目数 */
+  /** Write failures */
   failed: number;
-  /** 处理的文件数（forward）/ 导出的文件数（reverse） */
+  /** Files processed (forward) or files written (reverse) */
   files: number;
 }
 
-/** Markdown 文件切分后的块 */
+/** Markdown chunk after splitting by heading / paragraph boundaries. */
 interface FileChunk {
-  /** 1-based 起始行号 */
+  /** 1-based start line */
   startLine: number;
-  /** 1-based 结束行号（含） */
+  /** 1-based end line (inclusive) */
   endLine: number;
-  /** 块内完整文本 */
+  /** Chunk text */
   text: string;
-  /** 所属 heading（如 "## Section Name"） */
+  /** Closest preceding heading (e.g., "## Section Name") */
   heading: string | null;
 }
 
-// ── 文件扫描 ──────────────────────────────────────────────────────
+// ── File scanning ─────────────────────────────────────────────────
 
-/** memory/YYYY-MM-DD.md 文件名正则 */
+/** memory/YYYY-MM-DD.md filename pattern */
 const DAILY_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/;
 
 /**
- * 递归扫描目录，收集 MEMORY.md 和 memory/YYYY-MM-DD.md 文件。
- * 返回按文件名字典序排序的绝对路径列表。
+ * Recursively scan a directory for MEMORY.md and memory/YYYY-MM-DD.md files.
+ * Returns file paths sorted lexicographically (MEMORY.md first, then by date).
  */
 async function scanMemoryFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
@@ -106,7 +99,7 @@ async function scanMemoryFiles(dir: string): Promise<string[]> {
 
   await walk(dir);
 
-  // 字典序：MEMORY.md 优先，然后按日期排序
+  // Lexicographic: MEMORY.md first, then by date
   return files.sort((a, b) => {
     const ra = path.relative(dir, a).replace(/\\/g, "/");
     const rb = path.relative(dir, b).replace(/\\/g, "/");
@@ -116,16 +109,16 @@ async function scanMemoryFiles(dir: string): Promise<string[]> {
   });
 }
 
-// ── Markdown 切分 ─────────────────────────────────────────────────
+// ── Markdown chunking ─────────────────────────────────────────────
 
 /**
- * 将 markdown 行切分为语义块。
+ * Split markdown lines into semantic chunks.
  *
- * 切分策略（复用 dreaming-phases chunk 边界）：
- * - `## ` 或 `### ` 开头的行触发 flush，并更新当前 heading
- * - 空行触发 flush（段分隔）
- * - 连续的非空行聚合成一个 chunk
- * - snippet 长度不足 DAILY_INGESTION_MIN_SNIPPET_CHARS 的块被丢弃
+ * Strategy:
+ * - `## ` / `### ` lines start a new chunk and set the heading
+ * - Blank lines start a new chunk (paragraph boundary)
+ * - Consecutive non-blank lines accumulate into one chunk
+ * - Chunks shorter than 20 characters are discarded as noise
  */
 function chunkMarkdown(lines: string[]): FileChunk[] {
   const chunks: FileChunk[] = [];
@@ -139,7 +132,7 @@ function chunkMarkdown(lines: string[]): FileChunk[] {
       return;
     }
     const body = chunkLines.join(" ").replace(/\s+/g, " ").trim();
-    // 小于 20 字符的块丢弃（噪音）
+    // Minimum chunk size filter (skip noise shorter than 20 chars)
     if (body.length < 20) {
       chunkLines = [];
       chunkStartLine = endLine + 1;
@@ -160,10 +153,10 @@ function chunkMarkdown(lines: string[]): FileChunk[] {
     const line = lines[i];
     const lineNum = i + 1; // 1-based
 
-    // heading 检测
+    // Heading detection
     const hMatch = /^(#{2,3})\s+(.+)/.exec(line);
     if (hMatch) {
-      flush(lineNum - 1); // flush 之前的块
+      flush(lineNum - 1);
       heading = hMatch[2].trim();
       chunkStartLine = lineNum;
       continue;
@@ -171,45 +164,38 @@ function chunkMarkdown(lines: string[]): FileChunk[] {
 
     const trimmed = line.trim();
 
-    // 空行 → flush
+    // Blank line → flush current chunk
     if (!trimmed) {
       flush(lineNum);
       continue;
     }
 
-    // 列表项 / 普通行 → 累积
+    // List item or regular line → accumulate
     if (chunkLines.length === 0) {
       chunkStartLine = lineNum;
     }
-    // 去掉列表标记
+    // Strip list bullet marker
     const content = /^[-*]\s+/.test(trimmed)
       ? trimmed.replace(/^[-*]\s+/, "")
       : trimmed;
     chunkLines.push(content);
   }
 
-  // 最后 flush
+  // Final flush
   flush(lines.length);
 
   return chunks;
 }
 
-// ── 去重 ──────────────────────────────────────────────────────────
+// ── Dedup ─────────────────────────────────────────────────────────
 
-/** 去重键：基于 text + provenance_label 计算 content_hash（与 schema.ts 一致） */
+/** Dedup key: content_hash via SHA-256(text + "\0" + provenance_label), matches schema.ts. */
 const dedupKey = computeContentHash;
 
-// ── 正向迁移：Markdown → Milvus ──────────────────────────────────
+// ── Forward: Markdown → Milvus ───────────────────────────────────
 
 /**
- * 正向迁移：扫描 Markdown 文件 → 切分 → 写入 Milvus。
- *
- * @param manager 已就绪的 MilvusSearchManager
- * @param client  Milvus 客户端（用于跨 batch 去重）
- * @param collectionName Milvus 集合名称
- * @param inputDir 输入目录（含 MEMORY.md + memory/*.md）
- * @param opts.dryRun 仅预览，不实际写入
- * @returns 迁移结果统计
+ * Forward migration: scan markdown files → chunk → embed → write to Milvus.
  */
 export async function migrateMarkdownToMilvus(
   manager: MilvusSearchManager,
@@ -258,7 +244,7 @@ export async function migrateMarkdownToMilvus(
       }
       seenHashes.add(dKey);
 
-      // Cross-batch dedup: check content_hash in Milvus (converged from provenance_label)
+      // Cross-batch dedup: check content_hash in Milvus
       if (!opts.dryRun) {
         try {
           const existing = await client.query({
@@ -273,7 +259,7 @@ export async function migrateMarkdownToMilvus(
             continue;
           }
         } catch (err) {
-          // content_hash not yet on schema (alpha collection) → fallback to provenance_label
+          // Fallback: content_hash not yet on schema → try provenance_label
           try {
             const existing = await client.query({
               collection_name: collectionName,
@@ -335,27 +321,21 @@ export async function migrateMarkdownToMilvus(
   return result;
 }
 
-// ── 反向迁移：Milvus → Markdown ──────────────────────────────────
+// ── Reverse: Milvus → Markdown ──────────────────────────────────
 
-/** 逆向分页大小 */
+/** Page size for reverse migration queries. */
 const REVERSE_PAGE_SIZE = 500;
 
 /**
- * 反向迁移：从 Milvus 全量导出 → Markdown 文件。
+ * Reverse migration: export all entries from Milvus → markdown files.
  *
- * 输出目录结构：
+ * Output structure:
  * ```
  * memory-export/<timestamp>/
- *   MEMORY.md          ← long_term 条目（合并）
+ *   MEMORY.md          ← long_term entries (merged)
  *   memory/
- *     YYYY-MM-DD.md    ← short_term 条目（按 createdAt 日期分组）
+ *     YYYY-MM-DD.md    ← short_term entries (grouped by createdAt date)
  * ```
- *
- * @param client  Milvus 客户端
- * @param collectionName Milvus 集合名称
- * @param outputDir 输出根目录（例如 `/workspace/memory-export/2026-05-13T12-00-00`）
- * @param opts.type 过滤记忆类型："short_term" | "long_term" | "archived" | "all"
- * @returns 迁移结果统计
  */
 export async function migrateMilvusToMarkdown(
   client: MilvusClient,
@@ -366,7 +346,7 @@ export async function migrateMilvusToMarkdown(
   const result: MigrationResult = { inserted: 0, skipped: 0, failed: 0, files: 0 };
   const filterType = opts.type ?? "all";
 
-  // 分页查询全量条目
+  // Paginate all entries via offset
   const allEntries: Array<Record<string, unknown>> = [];
   let offset = 0;
   let hasMore = true;
@@ -416,7 +396,7 @@ export async function migrateMilvusToMarkdown(
     return result;
   }
 
-  // 分类：long_term → MEMORY.md, short_term + archived → memory/YYYY-MM-DD.md
+  // Classify: long_term → MEMORY.md, short_term + archived → memory/YYYY-MM-DD.md
   const longTermEntries: Array<Record<string, unknown>> = [];
   const dateGrouped = new Map<string, Array<Record<string, unknown>>>();
 
@@ -435,10 +415,10 @@ export async function migrateMilvusToMarkdown(
     }
   }
 
-  // 写入输出目录
+  // Write output directory
   await mkdir(path.join(outputDir, "memory"), { recursive: true });
 
-  // 写入 MEMORY.md（long_term 条目）
+  // MEMORY.md (long_term entries)
   if (longTermEntries.length > 0) {
     const memLines: string[] = [
       "# Memory Export",
@@ -459,7 +439,7 @@ export async function migrateMilvusToMarkdown(
     result.inserted += longTermEntries.length;
   }
 
-  // 写入 memory/YYYY-MM-DD.md（按日期分组）
+  // memory/YYYY-MM-DD.md (grouped by date)
   for (const [date, rows] of dateGrouped.entries()) {
     const lines: string[] = [
       `## ${date}`,
@@ -490,13 +470,11 @@ export async function migrateMilvusToMarkdown(
   return result;
 }
 
-// ── CLI 注册 ──────────────────────────────────────────────────────
+// ── CLI registration ──────────────────────────────────────────────
 
 /**
- * 在 commander program 上注册 `migrate <dir>` 子命令。
- *
- * 由 index.ts 中 `api.registerCli(registrar, { parentPath: ["memory"] })` 调用，
- * `program` 实参为已解析的 "memory" 父命令。
+ * Register the `migrate <dir>` subcommand on the commander program.
+ * Called from index.ts via api.registerCli.
  */
 export function registerMigrationCli(
   program: Command,
