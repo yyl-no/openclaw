@@ -1043,3 +1043,29 @@ search()
 | README `cfg.memory.citations` 开关说明 | 功能已实现，README "Not yet available" 需刷新 |
 | `OPENCLAW_LIVE_TEST=1` 端到端 | 需真实 Milvus + embedding API key |
 | 9 维高级召回信号 | 占位待定，不影响能力对齐 |
+
+---
+
+### 补充修复: Dreaming Embedding Provider 加载失败 ✅ 完成
+
+**日期**：2026-05-15
+
+**问题**：`/milvus-dreaming run` 报 `dreaming manager lazy-init failed`，根因是 `registerBuiltInMemoryEmbeddingProviders(api)` 调用的 SDK barrel 路径 `openclaw/plugin-sdk/memory-core-bundled-runtime` 不在此版 OpenClaw 的导出白名单中，插件加载时直接失败。
+
+**修复**：
+
+| # | 动作 | 文件 |
+|---|------|------|
+| 1 | 删除无效 SDK import，改用 `createRequire` 直接从 openclaw npm 包的 dist 目录加载 bundled runtime JS | `index.ts` L24-27 |
+| 2 | `register()` 首行调用 `registerBuiltInMemoryEmbeddingProviders(api)` 自注册内置 embedding provider | `index.ts` L252 |
+| 3 | 配置 `embedding.provider` 从 `"local"` 改为 `"auto"` | `~/.openclaw/openclaw.json` |
+| 4 | dreaming manager resolver 改为工厂模式支持 lazy-init（前期已完成） | `dreaming.ts` |
+
+**验证**：
+- `/milvus-dreaming run` → `dreaming sweep start (limit=5, minScore=0.300, minRecallCount=2)` 正常启动
+- 日志无 `lazy-init failed` 错误
+- `0 candidate(s) ranked, 0 promoted` — 正常运行完成（暂无符合条件的 short-term 记忆）
+
+**注意事项**：
+- `createRequire` 加载的 dist 路径随安装位置和构建哈希变化，部署时需替换实际路径
+- WSL 无 cron 服务，`managed dreaming cron could not be reconciled` 为预期 WARN，手动 `/milvus-dreaming run` 不受影响

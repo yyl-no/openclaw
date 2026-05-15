@@ -4,7 +4,10 @@
     "onStartup": false
   },
   "kind": "memory",
-  "commandAliases": [{ "name": "memory-migrate" }],
+  "commandAliases": [
+      { "name": "memory-migrate" },
+      { "name": "milvus-dreaming", "kind": "runtime-slash" }
+    ],
   "contracts": {
     "tools": ["memory_write", "memory_get", "memory_search"]
   },
@@ -40,6 +43,30 @@
       "placeholder": "1024",
       "help": "Vector dimensions for the embedding model",
       "advanced": true
+    },
+    "dreaming.enabled": {
+      "label": "Dreaming Enabled",
+      "help": "Enable scheduled short-term-to-long-term memory promotion via Milvus dreaming"
+    },
+    "dreaming.cron": {
+      "label": "Dreaming Schedule",
+      "placeholder": "0 3 * * *",
+      "help": "Cron expression for the dreaming sweep cadence"
+    },
+    "dreaming.limit": {
+      "label": "Promotion Limit",
+      "placeholder": "5",
+      "help": "Max short-term memories to promote per dreaming sweep"
+    },
+    "dreaming.minScore": {
+      "label": "Min Promotion Score",
+      "placeholder": "0.3",
+      "help": "Minimum composite score (0-1) for a short-term memory to be promoted"
+    },
+    "dreaming.minRecallCount": {
+      "label": "Min Recall Count",
+      "placeholder": "2",
+      "help": "Minimum recall count for a short-term memory to be a promotion candidate"
     }
   },
   "configSchema": {
@@ -77,6 +104,49 @@
             "type": "number",
             "minimum": 128,
             "maximum": 8192
+          }
+        }
+      },
+      "dreaming": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "cron": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number",
+            "minimum": 0
+          },
+          "minScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minRecallCount": {
+            "type": "number",
+            "minimum": 0
+          },
+          "minUniqueQueries": {
+            "type": "number",
+            "minimum": 0
+          },
+          "recencyHalfLifeDays": {
+            "type": "number",
+            "minimum": 1
+          },
+          "maxAgeDays": {
+            "type": "number",
+            "minimum": 1
+          },
+          "verboseLogging": {
+            "type": "boolean"
           }
         }
       }

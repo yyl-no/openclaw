@@ -21,6 +21,12 @@ import {
   definePluginEntry,
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/plugin-entry";
+import { createRequire } from "module";
+const _require = createRequire(import.meta.url);
+// 运行时从 openclaw npm 包的 dist 目录加载 bundled memory-core-bundled-runtime。
+// 路径随安装位置和构建哈希变化，部署时需替换为实际 dist 路径。
+const _bundled = _require("/home/yl/.npm-global/lib/node_modules/openclaw/dist/memory-core-bundled-runtime-BcwkfmWM.js");
+const registerBuiltInMemoryEmbeddingProviders = _bundled.r ?? _bundled.registerBuiltInMemoryEmbeddingProviders;
 import { DEFAULT_COLLECTION_NAME } from "./src/schema.js";
 import {
   MilvusSearchManager,
@@ -31,6 +37,10 @@ import { ensureCollectionReady } from "./src/collection-bootstrap.js";
 import { createMemoryWriteTool } from "./src/tools.js";
 import { createMemorySearchTool } from "./src/tools.search.js";
 import { createMemoryGetTool } from "./src/tools.get.js";
+import {
+  setDreamingManagerResolver,
+  registerShortTermPromotionDreaming,
+} from "./src/dreaming.js";
 
 // ── Prompt Builder ─────────────────────────────────────────────────
 
@@ -234,6 +244,10 @@ export default definePluginEntry({
   description: "Milvus-backed memory search tools with vector ANN + BM25 hybrid search",
   kind: "memory",
   register(api: OpenClawPluginApi) {
+    // 自行注册内置 embedding provider（local/openai 等），
+    // 避免依赖 memory-core 插件的加载顺序（slot 指向 memory-milvus 时 memory-core 不会被加载）。
+    registerBuiltInMemoryEmbeddingProviders(api);
+
     api.registerMemoryCapability({
       promptBuilder: buildPromptSection,
       flushPlanResolver: buildMilvusFlushPlan,
@@ -255,6 +269,21 @@ export default definePluginEntry({
     api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), {
       names: ["memory_get"],
     });
+
+    // Dreaming 调度编排 — lazy-init factory：当 activeManager 为 null/degraded
+    // 时通过 milvusRuntime.getMemorySearchManager() 按需创建，解决 cron isolated
+    // session 中 activeManager 尚未初始化导致 dreaming sweep 失败的问题。
+    setDreamingManagerResolver(async (cfg: OpenClawConfig, agentId: string) => {
+      if (activeManager && !activeManager.degraded) return activeManager;
+      const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
+      if (!result.manager && result.error) {
+        api.logger.warn(
+          `memory-milvus: dreaming manager lazy-init failed: ${result.error}`,
+        );
+      }
+      return result.manager as MilvusSearchManager | null;
+    });
+    registerShortTermPromotionDreaming(api);
 
     // CLI: memory-migrate <dir> [--reverse] [--dry-run]
     // 独立命令注册（无 parentPath），不依赖 memory-core CLI 根命令
