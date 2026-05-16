@@ -1,7 +1,10 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { MilvusClient } from "@zilliz/milvus2-sdk-node";
-import type { MemoryEntry, MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { MemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+import type {
+  MemoryEntry,
+  MemoryReference,
+} from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { MilvusSearchManager, type MilvusSearchConfig } from "./search.js";
 
 // ── Mocks ─────────────────────────────────────────────────────────
@@ -56,7 +59,14 @@ function makeProvider(): MemoryEmbeddingProvider {
   } as unknown as MemoryEmbeddingProvider;
 }
 
-function makeClient(overrides?: Partial<Record<"describeCollection" | "insert" | "query" | "upsert" | "get" | "search", ReturnType<typeof vi.fn>>>): MilvusClient {
+function makeClient(
+  overrides?: Partial<
+    Record<
+      "describeCollection" | "insert" | "query" | "upsert" | "get" | "search",
+      ReturnType<typeof vi.fn>
+    >
+  >,
+): MilvusClient {
   return {
     describeCollection: vi.fn().mockResolvedValue({}),
     insert: vi.fn().mockResolvedValue({ IDs: { int_id: { data: [42] } } }),
@@ -67,14 +77,12 @@ function makeClient(overrides?: Partial<Record<"describeCollection" | "insert" |
   } as unknown as MilvusClient;
 }
 
-function createManager(
-  opts?: {
-    client?: MilvusClient;
-    provider?: MemoryEmbeddingProvider;
-    agentId?: string;
-    degraded?: boolean;
-  },
-): MilvusSearchManager {
+function createManager(opts?: {
+  client?: MilvusClient;
+  provider?: MemoryEmbeddingProvider;
+  agentId?: string;
+  degraded?: boolean;
+}): MilvusSearchManager {
   const client = opts?.client ?? makeClient();
   const provider = opts?.provider ?? makeProvider();
   return new MilvusSearchManager(
@@ -309,9 +317,9 @@ describe("MilvusSearchManager.recordRecall", () => {
     // force closed
     await (manager as unknown as { close(): Promise<void> }).close();
 
-    await expect(
-      manager.recordRecall(makeRefs(["1"])),
-    ).rejects.toThrow("MilvusSearchManager is closed");
+    await expect(manager.recordRecall(makeRefs(["1"]))).rejects.toThrow(
+      "MilvusSearchManager is closed",
+    );
   });
 
   it("degraded → warnOnce then return, skip client", async () => {
@@ -382,7 +390,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     expect(new Date(t2).getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it("refs with ids not in milvus still accumulate normally (prevCount=0)", async () => {
+  it("skips ids not found in milvus (no ghost rows)", async () => {
     const querySpy = vi.fn().mockResolvedValue({
       data: [makeQueryRow("1", 5)], // only id=1 is in db
     });
@@ -391,17 +399,13 @@ describe("MilvusSearchManager.recordRecall", () => {
     const client = makeClient({ query: querySpy, upsert: upsertSpy });
     const manager = createManager({ client });
 
-    await manager.recordRecall(makeRefs(["1", "missing-id"]));
+    await manager.recordRecall(makeRefs(["1", "99"])); // 99 not in db → skipped
 
     const rows = upsertSpy.mock.calls[0][0].data as Record<string, unknown>[];
-    expect(rows).toHaveLength(2);
-
-    // id=1: 5+1=6
-    expect(rows.find((r) => r.id === "1")!.recall_count).toBe(6);
-    // missing-id: 0+1=1, no original fields (no existing row)
-    const missing = rows.find((r) => r.id === "missing-id")!;
-    expect(missing.recall_count).toBe(1);
-    expect(missing.text).toBeUndefined();
+    expect(rows).toHaveLength(1); // only id=1, 99 skipped
+    expect(rows[0]!.id).toBe("1");
+    expect(rows[0]!.recall_count).toBe(6); // 5+1=6
+    expect(rows[0]!.text).toBe("text-1"); // full row preserved
   });
 
   it("upsert failure → warnOnce, does not throw", async () => {
@@ -413,9 +417,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     const client = makeClient({ query: querySpy, upsert: upsertSpy });
     const manager = createManager({ client });
 
-    await expect(
-      manager.recordRecall(makeRefs(["1"])),
-    ).resolves.toBeUndefined();
+    await expect(manager.recordRecall(makeRefs(["1"]))).resolves.toBeUndefined();
 
     // query was still called
     expect(querySpy).toHaveBeenCalledOnce();
@@ -429,9 +431,7 @@ describe("MilvusSearchManager.recordRecall", () => {
     const client = makeClient({ query: querySpy, upsert: upsertSpy });
     const manager = createManager({ client });
 
-    await expect(
-      manager.recordRecall(makeRefs(["1"])),
-    ).resolves.toBeUndefined();
+    await expect(manager.recordRecall(makeRefs(["1"]))).resolves.toBeUndefined();
 
     expect(upsertSpy).not.toHaveBeenCalled();
   });
@@ -511,7 +511,11 @@ describe("MilvusSearchManager.get", () => {
 // ── search scalar filter (memoryType / createdAfter) ─────────────
 
 describe("MilvusSearchManager.search: scalar filters", () => {
-  function makeQueryRow(id: string, memoryType = "short_term", createdAt = "2026-05-13T10:00:00.000Z") {
+  function makeQueryRow(
+    id: string,
+    memoryType = "short_term",
+    createdAt = "2026-05-13T10:00:00.000Z",
+  ) {
     return {
       id,
       text: `text-${id}`,
@@ -566,7 +570,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 
     expect(results).toHaveLength(1);
     expect(querySpy).toHaveBeenCalledOnce();
-    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type != "archived" && created_at >= "2026-05-13T00:00:00.000Z"');
+    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe(
+      'agent_id == "agent-1" && memory_type != "archived" && created_at >= "2026-05-13T00:00:00.000Z"',
+    );
   });
 
   it("empty query + memoryType + createdAfter → combined filter", async () => {
@@ -580,7 +586,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
     });
 
     expect(querySpy).toHaveBeenCalledOnce();
-    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type == "long_term" && created_at >= "2026-05-01T00:00:00.000Z"');
+    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe(
+      'agent_id == "agent-1" && memory_type == "long_term" && created_at >= "2026-05-01T00:00:00.000Z"',
+    );
   });
 
   it("empty query + no filters → queryByFilter with only agent_id", async () => {
@@ -593,7 +601,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
     expect(results).toHaveLength(2);
     expect(querySpy).toHaveBeenCalledOnce();
     // scalarFilter includes agent_id + default excludeArchived
-    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type != "archived"');
+    expect(querySpy.mock.calls[0]?.[0]?.filter).toBe(
+      'agent_id == "agent-1" && memory_type != "archived"',
+    );
   });
 
   it("non-empty query + memoryType → hybrid search with combined filter", async () => {
@@ -607,7 +617,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 
     // vector search received the combined filter
     expect(searchSpy).toHaveBeenCalledOnce();
-    expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && memory_type == "short_term"');
+    expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe(
+      'agent_id == "agent-1" && memory_type == "short_term"',
+    );
   });
 
   it("non-empty query + sessionKey + memoryType → combined filter", async () => {
@@ -624,7 +636,9 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 
     // scalar filter includes sessionKey + memoryType + agentId
     expect(searchSpy).toHaveBeenCalledOnce();
-    expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe('agent_id == "agent-1" && session_key == "sess-abc" && memory_type == "long_term"');
+    expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe(
+      'agent_id == "agent-1" && session_key == "sess-abc" && memory_type == "long_term"',
+    );
   });
 
   it("queryByFilter returns empty on no data", async () => {
@@ -640,12 +654,7 @@ describe("MilvusSearchManager.search: scalar filters", () => {
 // ── rankPromotionCandidates ──────────────────────────────────────
 
 describe("MilvusSearchManager.rankPromotionCandidates", () => {
-  function makeQueryRow(
-    id: string,
-    recallCount: number,
-    createdAt: string,
-    lastRecalledAt = "",
-  ) {
+  function makeQueryRow(id: string, recallCount: number, createdAt: string, lastRecalledAt = "") {
     return {
       id,
       snippet: `snippet-${id}`,
@@ -663,9 +672,9 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
     const manager = createManager();
     await manager.close();
 
-    await expect(
-      manager.rankPromotionCandidates({}),
-    ).rejects.toThrow("MilvusSearchManager is closed");
+    await expect(manager.rankPromotionCandidates({})).rejects.toThrow(
+      "MilvusSearchManager is closed",
+    );
   });
 
   it("degraded → warnOnce + return []", async () => {
@@ -679,10 +688,10 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
 
   it("normal ranking: scored by recall_count + recency", async () => {
     const rows = [
-      makeQueryRow("1", 20, RECENT_ISO, RECENT_ISO),   // high recall + recent → high score
-      makeQueryRow("2", 5, RECENT_ISO, RECENT_ISO),     // medium recall + recent → medium score
-      makeQueryRow("3", 20, OLD_ISO, OLD_ISO),           // high recall + old → decayed
-      makeQueryRow("4", 0, RECENT_ISO),                   // 0 recall → filtered by minRecallCount
+      makeQueryRow("1", 20, RECENT_ISO, RECENT_ISO), // high recall + recent → high score
+      makeQueryRow("2", 5, RECENT_ISO, RECENT_ISO), // medium recall + recent → medium score
+      makeQueryRow("3", 20, OLD_ISO, OLD_ISO), // high recall + old → decayed
+      makeQueryRow("4", 0, RECENT_ISO), // 0 recall → filtered by minRecallCount
     ];
     const querySpy = vi.fn().mockResolvedValue({ data: rows });
     const client = makeClient({ query: querySpy });
@@ -784,7 +793,11 @@ describe("MilvusSearchManager.rankPromotionCandidates", () => {
 // ── applyPromotions ───────────────────────────────────────────────
 
 describe("MilvusSearchManager.applyPromotions", () => {
-  function makeCandidate(overrides: Partial<import("openclaw/plugin-sdk/memory-core-host-engine-storage").PromotionCandidate> = {}) {
+  function makeCandidate(
+    overrides: Partial<
+      import("openclaw/plugin-sdk/memory-core-host-engine-storage").PromotionCandidate
+    > = {},
+  ) {
     return {
       id: "42",
       snippet: "Test snippet",
@@ -816,9 +829,9 @@ describe("MilvusSearchManager.applyPromotions", () => {
     const manager = createManager();
     await manager.close();
 
-    await expect(
-      manager.applyPromotions({ candidates: [makeCandidate()] }),
-    ).rejects.toThrow("MilvusSearchManager is closed");
+    await expect(manager.applyPromotions({ candidates: [makeCandidate()] })).rejects.toThrow(
+      "MilvusSearchManager is closed",
+    );
   });
 
   it("degraded → { applied: 0, appliedCandidates: [] }", async () => {
@@ -867,9 +880,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
 
     // Step 1: get original entry
     expect(getSpy).toHaveBeenCalledOnce();
-    expect(getSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ ids: ["1"] }),
-    );
+    expect(getSpy).toHaveBeenCalledWith(expect.objectContaining({ ids: ["1"] }));
 
     // Step 2: insertEntry (embed + insert long_term)
     expect(provider.embedQuery).toHaveBeenCalledOnce();
@@ -890,11 +901,13 @@ describe("MilvusSearchManager.applyPromotions", () => {
   });
 
   it("all candidates succeed", async () => {
-    const getSpy = vi.fn()
+    const getSpy = vi
+      .fn()
       .mockResolvedValueOnce({ data: [makeGetRow("1")] })
       .mockResolvedValueOnce({ data: [makeGetRow("2")] })
       .mockResolvedValueOnce({ data: [makeGetRow("3")] });
-    const insertSpy = vi.fn()
+    const insertSpy = vi
+      .fn()
       .mockResolvedValue({ IDs: { int_id: { data: [101] } } })
       .mockResolvedValue({ IDs: { int_id: { data: [102] } } })
       .mockResolvedValue({ IDs: { int_id: { data: [103] } } });
@@ -929,10 +942,7 @@ describe("MilvusSearchManager.applyPromotions", () => {
     const manager = createManager({ client, provider });
 
     const result = await manager.applyPromotions({
-      candidates: [
-        makeCandidate({ id: "1", score: 0.9 }),
-        makeCandidate({ id: "2", score: 0.3 }),
-      ],
+      candidates: [makeCandidate({ id: "1", score: 0.9 }), makeCandidate({ id: "2", score: 0.3 })],
       minScore: 0.5,
     });
 
@@ -963,10 +973,12 @@ describe("MilvusSearchManager.applyPromotions", () => {
   });
 
   it("limit truncation", async () => {
-    const getSpy = vi.fn()
+    const getSpy = vi
+      .fn()
       .mockResolvedValue({ data: [makeGetRow("1")] })
       .mockResolvedValue({ data: [makeGetRow("2")] });
-    const insertSpy = vi.fn()
+    const insertSpy = vi
+      .fn()
       .mockResolvedValue({ IDs: { int_id: { data: [101] } } })
       .mockResolvedValue({ IDs: { int_id: { data: [102] } } });
     const upsertSpy = vi.fn().mockResolvedValue({});
@@ -988,7 +1000,8 @@ describe("MilvusSearchManager.applyPromotions", () => {
   });
 
   it("skips failed get candidate, continues processing others", async () => {
-    const getSpy = vi.fn()
+    const getSpy = vi
+      .fn()
       .mockResolvedValueOnce({ data: [makeGetRow("1")] })
       .mockRejectedValueOnce(new Error("Memory entry not found: 2"));
     const insertSpy = vi.fn().mockResolvedValue({
@@ -1015,10 +1028,12 @@ describe("MilvusSearchManager.applyPromotions", () => {
   });
 
   it("skips failed insertEntry candidate, continues processing others", async () => {
-    const getSpy = vi.fn()
+    const getSpy = vi
+      .fn()
       .mockResolvedValue({ data: [makeGetRow("1")] })
       .mockResolvedValue({ data: [makeGetRow("2")] });
-    const insertSpy = vi.fn()
+    const insertSpy = vi
+      .fn()
       .mockResolvedValueOnce({ IDs: { int_id: { data: [101] } } })
       .mockRejectedValueOnce(new Error("Insert timeout"));
     const upsertSpy = vi.fn().mockResolvedValue({});

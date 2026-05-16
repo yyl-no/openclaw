@@ -1139,7 +1139,12 @@ export class MilvusSearchManager {
       return;
     }
 
-    const ids = refs.map((r) => r.id).filter(Boolean);
+    // Normalize and filter: only numeric Milvus PKs (exclude fallback:xxx, milvus: prefixes)
+    const ids = refs
+      .map((r) => r.id)
+      .filter(Boolean)
+      .map((id) => id.replace(/^milvus:/, "").trim())
+      .filter((id) => /^\d+$/.test(id));
     if (!ids.length) return;
 
     try {
@@ -1176,28 +1181,28 @@ export class MilvusSearchManager {
       const upsertRows: Record<string, unknown>[] = [];
       for (const id of ids) {
         const existing = existingMap.get(id);
+        // Skip IDs not found in Milvus — avoid creating ghost rows with missing fields
+        if (!existing) continue;
+
         const prevCount =
-          existing?.[FIELD_RECALL_COUNT] != null ? Number(existing[FIELD_RECALL_COUNT]) : 0;
+          existing[FIELD_RECALL_COUNT] != null ? Number(existing[FIELD_RECALL_COUNT]) : 0;
 
         const row: Record<string, unknown> = {
           [FIELD_ID]: id,
           [FIELD_RECALL_COUNT]: prevCount + 1,
           [FIELD_LAST_RECALLED_AT]: now,
           [FIELD_UPDATED_AT]: now,
+          // Preserve existing field values (upsert requires full rows to avoid clearing fields)
+          [FIELD_TEXT]: existing[FIELD_TEXT],
+          [FIELD_SNIPPET]: existing[FIELD_SNIPPET],
+          [FIELD_AGENT_ID]: existing[FIELD_AGENT_ID],
+          [FIELD_SESSION_KEY]: existing[FIELD_SESSION_KEY],
+          [FIELD_MEMORY_TYPE]: existing[FIELD_MEMORY_TYPE],
+          [FIELD_PROVENANCE_KIND]: existing[FIELD_PROVENANCE_KIND],
+          [FIELD_PROVENANCE_LABEL]: existing[FIELD_PROVENANCE_LABEL],
+          [FIELD_CONTENT_HASH]: existing[FIELD_CONTENT_HASH],
+          [FIELD_CREATED_AT]: existing[FIELD_CREATED_AT],
         };
-
-        // Preserve existing field values (upsert requires full rows to avoid clearing fields)
-        if (existing) {
-          row[FIELD_TEXT] = existing[FIELD_TEXT];
-          row[FIELD_SNIPPET] = existing[FIELD_SNIPPET];
-          row[FIELD_AGENT_ID] = existing[FIELD_AGENT_ID];
-          row[FIELD_SESSION_KEY] = existing[FIELD_SESSION_KEY];
-          row[FIELD_MEMORY_TYPE] = existing[FIELD_MEMORY_TYPE];
-          row[FIELD_PROVENANCE_KIND] = existing[FIELD_PROVENANCE_KIND];
-          row[FIELD_PROVENANCE_LABEL] = existing[FIELD_PROVENANCE_LABEL];
-          row[FIELD_CONTENT_HASH] = existing[FIELD_CONTENT_HASH];
-          row[FIELD_CREATED_AT] = existing[FIELD_CREATED_AT];
-        }
 
         upsertRows.push(row);
       }

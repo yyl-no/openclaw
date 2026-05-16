@@ -1209,3 +1209,20 @@ search()
 | 2   | `applyPromotions()` 归档步骤 | 复用已查到的 `entry` + query embedding → `entryToInsertData` 全字段 → upsert |
 
 **验证**：`npx vitest run extensions/memory-milvus` → 9 files / 134 tests 全过
+
+---
+
+### P0-4 修复: recordRecall 跳过不存在ID + 过滤非数字ID ✅ 完成
+
+**日期**：2026-05-14
+
+**问题**：`recordRecall()` 对 Milvus 中不存在的 ID 仍构造残缺行 upsert（仅有 `{id, recall_count, last_recalled_at}`，缺失 text/embedding/provenance 等全部字段），造成数据库垃圾行。同时 `fallback:` / `milvus:` 前缀等非数字 ID 直接拼入 Milvus filter 表达式导致语法错误。
+
+**修复**（2 处）：
+
+| #   | 文件                 | 改动                                                                                                                                                                   |
+| --- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `src/search.ts`      | ID 列表提前 normalize（去 `milvus:` 前缀 + `\d+` 过滤）；for 循环中 `if (!existing) continue` 跳过不存在的 ID；删除 `if (existing)` 条件分支（现在 existing 一定存在） |
+| 2   | `src/search.test.ts` | 旧测试断言残缺行存在 → 新测试断言不存在 ID 被跳过、全字段保留                                                                                                          |
+
+**验证**：`npx vitest run extensions/memory-milvus` → 9 files / 134 tests 全过
