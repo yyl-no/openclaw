@@ -6,6 +6,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
 import { resolveMergedSafeBinProfileFixtures } from "../infra/exec-safe-bin-runtime-policy.js";
 import { logWarn } from "../logger.js";
+import { getMemoryCapabilityRegistration } from "../plugins/memory-state.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import {
@@ -89,7 +90,6 @@ import {
   type ToolSearchCatalogToolExecutor,
 } from "./tool-search.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
-import { getMemoryCapabilityRegistration } from "../plugins/memory-state.js";
 
 function isOpenAIProvider(provider?: string) {
   const normalized = normalizeOptionalLowercaseString(provider);
@@ -333,7 +333,7 @@ export function createOpenClawCodingTools(options?: {
   jobId?: string;
   /** Relative workspace path that memory-triggered writes may append to. */
   memoryFlushWritePath?: string;
-  /** Backend kind for memory-triggered flush (file wraps write tool, milvus leaves it native). */
+  /** Backend kind for memory-triggered flush (file wraps write tool to append-only; milvus excludes write so the model must use memory_write). */
   memoryFlushBackendKind?: "file" | "milvus";
   agentDir?: string;
   workspaceDir?: string;
@@ -437,7 +437,11 @@ export function createOpenClawCodingTools(options?: {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
   const isMemoryFlushRun = options?.trigger === "memory";
-  if (isMemoryFlushRun && options?.memoryFlushBackendKind !== "milvus" && !options?.memoryFlushWritePath) {
+  if (
+    isMemoryFlushRun &&
+    options?.memoryFlushBackendKind !== "milvus" &&
+    !options?.memoryFlushWritePath
+  ) {
     throw new Error("memoryFlushWritePath required for memory-triggered tool runs");
   }
   const isMilvusBackend = options?.memoryFlushBackendKind === "milvus";
@@ -877,19 +881,26 @@ export function createOpenClawCodingTools(options?: {
       if (!resolveMemoryWriteToolNames().has(tool.name)) {
         continue;
       }
-      if (tool.name === "write" && !isMilvusBackend && memoryFlushWritePath) {
-        toolsForMemoryFlush.push(
-          wrapToolMemoryFlushAppendOnlyWrite(tool, {
-            root: sandboxRoot ?? workspaceRoot,
-            relativePath: memoryFlushWritePath,
-            containerWorkdir: sandbox?.containerWorkdir,
-            sandbox:
-              sandboxRoot && sandboxFsBridge
-                ? { root: sandboxRoot, bridge: sandboxFsBridge }
-                : undefined,
-          }),
-        );
-        continue;
+      if (tool.name === "write") {
+        // Milvus backend: exclude the general write tool so the model must use memory_write.
+        if (isMilvusBackend) {
+          continue;
+        }
+        // File backend: wrap the write tool for append-only restricted writes.
+        if (memoryFlushWritePath) {
+          toolsForMemoryFlush.push(
+            wrapToolMemoryFlushAppendOnlyWrite(tool, {
+              root: sandboxRoot ?? workspaceRoot,
+              relativePath: memoryFlushWritePath,
+              containerWorkdir: sandbox?.containerWorkdir,
+              sandbox:
+                sandboxRoot && sandboxFsBridge
+                  ? { root: sandboxRoot, bridge: sandboxFsBridge }
+                  : undefined,
+            }),
+          );
+          continue;
+        }
       }
       toolsForMemoryFlush.push(tool);
     }

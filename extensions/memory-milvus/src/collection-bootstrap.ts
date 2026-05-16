@@ -1,6 +1,10 @@
 /** Milvus collection lifecycle — eager init with idempotent create/index/load steps. */
 
-import { MilvusClient, type ResStatus, type DescribeCollectionResponse } from "@zilliz/milvus2-sdk-node";
+import {
+  MilvusClient,
+  type ResStatus,
+  type DescribeCollectionResponse,
+} from "@zilliz/milvus2-sdk-node";
 import type { FieldType } from "@zilliz/milvus2-sdk-node/dist/milvus/types/Collection.js";
 import {
   FIELD_AGENT_ID,
@@ -148,8 +152,9 @@ function buildCollectionFields(embeddingDim: number): FieldType[] {
     {
       name: FIELD_SPARSE_BM25,
       data_type: "SparseFloatVector",
+      nullable: true,
       description: BM25_FIELD_DESCRIPTION,
-    },
+    } as FieldType,
     {
       name: FIELD_METADATA,
       data_type: "JSON",

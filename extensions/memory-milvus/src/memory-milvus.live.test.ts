@@ -8,10 +8,10 @@
  * Run: OPENCLAW_LIVE_TEST=1 pnpm test:live extensions/memory-milvus
  */
 
-import { describe, expect, it } from "vitest";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { getMemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import { resolveAgentWorkspaceDir } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { describe, expect, it } from "vitest";
 import { ensureCollectionReady } from "./collection-bootstrap.js";
 import { DEFAULT_COLLECTION_NAME } from "./schema.js";
 import { createMilvusClient, MilvusSearchManager } from "./search.js";
@@ -78,7 +78,12 @@ async function createLiveManager(client: ReturnType<typeof createMilvusClient>) 
 
 describeLive("memory-milvus live E2E", () => {
   it("write → writes a memory entry and asserts return value", async () => {
-    const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
+    const client = createMilvusClient({
+      host: LIVE_HOST,
+      port: LIVE_PORT,
+      collectionName: DEFAULT_COLLECTION_NAME,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+    });
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
       embeddingDim: 1536,
@@ -100,7 +105,12 @@ describeLive("memory-milvus live E2E", () => {
   });
 
   it("write → search hit → recordRecall accumulates", async () => {
-    const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
+    const client = createMilvusClient({
+      host: LIVE_HOST,
+      port: LIVE_PORT,
+      collectionName: DEFAULT_COLLECTION_NAME,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+    });
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
       embeddingDim: 1536,
@@ -138,7 +148,12 @@ describeLive("memory-milvus live E2E", () => {
   });
 
   it("promotion full pipeline: rank → apply → new long_term + original archived", async () => {
-    const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
+    const client = createMilvusClient({
+      host: LIVE_HOST,
+      port: LIVE_PORT,
+      collectionName: DEFAULT_COLLECTION_NAME,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+    });
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
       embeddingDim: 1536,
@@ -157,18 +172,15 @@ describeLive("memory-milvus live E2E", () => {
       expect(ref.id).toBeTruthy();
 
       // 2. Simulate multiple recalls (build up recall_count)
-      await manager.recordRecall(
-        [{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }],
-        { query: "promotion test" },
-      );
-      await manager.recordRecall(
-        [{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }],
-        { query: "promotion test" },
-      );
-      await manager.recordRecall(
-        [{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }],
-        { query: "promotion test" },
-      );
+      await manager.recordRecall([{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }], {
+        query: "promotion test",
+      });
+      await manager.recordRecall([{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }], {
+        query: "promotion test",
+      });
+      await manager.recordRecall([{ ...ref, snippet: uniqueText.slice(0, 200), score: 0.8 }], {
+        query: "promotion test",
+      });
 
       // 3. Rank candidates
       const candidates = await manager.rankPromotionCandidates({
@@ -196,9 +208,7 @@ describeLive("memory-milvus live E2E", () => {
         memoryType: MEMORY_TYPES.LONG_TERM,
         maxResults: 5,
       });
-      const longTermFound = longTermResults.find(
-        (r) => r.provenance.label === "recall_promotion",
-      );
+      const longTermFound = longTermResults.find((r) => r.provenance.label === "recall_promotion");
       expect(longTermFound).toBeTruthy();
     } finally {
       await manager.close();
@@ -206,7 +216,12 @@ describeLive("memory-milvus live E2E", () => {
   });
 
   it("get → reads full MemoryEntry by id", async () => {
-    const client = createMilvusClient(LIVE_HOST, LIVE_PORT);
+    const client = createMilvusClient({
+      host: LIVE_HOST,
+      port: LIVE_PORT,
+      collectionName: DEFAULT_COLLECTION_NAME,
+      embedding: { provider: "openai", model: "text-embedding-3-small" },
+    });
     await ensureCollectionReady(client, {
       collectionName: DEFAULT_COLLECTION_NAME,
       embeddingDim: 1536,

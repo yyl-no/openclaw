@@ -84,15 +84,32 @@ function readPluginConfig(cfg: OpenClawConfig): Record<string, unknown> | undefi
 function parseMilvusConfig(raw: Record<string, unknown>): MilvusSearchConfig {
   const milvus = (raw.milvus as Record<string, unknown>) ?? {};
   const embedding = (raw.embedding as Record<string, unknown>) ?? {};
+  const search = (raw.search as Record<string, unknown>) ?? {};
+  const index = (raw.index as Record<string, unknown>) ?? {};
 
   return {
     host: String(milvus.host ?? "localhost"),
     port: Number(milvus.port ?? 19530) || 19530,
     collectionName: String(milvus.collectionName ?? DEFAULT_COLLECTION_NAME),
+    token: milvus.token != null ? String(milvus.token) : undefined,
+    username: milvus.username != null ? String(milvus.username) : undefined,
+    password: milvus.password != null ? String(milvus.password) : undefined,
+    ssl: milvus.ssl === true || milvus.ssl === "true",
+    database: milvus.database != null ? String(milvus.database) : undefined,
     embedding: {
       provider: String(embedding.provider ?? "auto"),
       model: String(embedding.model ?? "text-embedding-v3"),
       dimensions: embedding.dimensions != null ? Number(embedding.dimensions) : undefined,
+    },
+    search: {
+      vectorWeight: search.vectorWeight != null ? Number(search.vectorWeight) : undefined,
+      textWeight: search.textWeight != null ? Number(search.textWeight) : undefined,
+      useBM25: search.useBM25 === true || search.useBM25 === "true",
+    },
+    index: {
+      metricType: index.metricType != null ? String(index.metricType) : undefined,
+      hnswM: index.hnswM != null ? Number(index.hnswM) : undefined,
+      efConstruction: index.efConstruction != null ? Number(index.efConstruction) : undefined,
     },
   };
 }
@@ -192,13 +209,16 @@ async function buildMilvusManager(params: {
   const { cfg, agentId, searchCfg } = params;
   let degraded = false;
 
-  const client = createMilvusClient(searchCfg.host, searchCfg.port);
+  const client = createMilvusClient(searchCfg);
 
   // Eager init: ensure the collection is ready (degrade on failure, do not throw)
   try {
     await ensureCollectionReady(client, {
       collectionName: searchCfg.collectionName,
       embeddingDim: searchCfg.embedding.dimensions ?? 1024,
+      metricType: searchCfg.index?.metricType,
+      hnswM: searchCfg.index?.hnswM,
+      efConstruction: searchCfg.index?.efConstruction,
     });
   } catch (bootstrapErr) {
     console.warn(

@@ -2,10 +2,10 @@
 
 import { readFile, readdir, mkdir, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
-import type { Command } from "commander";
 import type { MilvusClient, QueryReq } from "@zilliz/milvus2-sdk-node";
+import type { Command } from "commander";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-
+import { ensureCollectionReady } from "./collection-bootstrap.js";
 import {
   FIELD_CONTENT_HASH,
   FIELD_ID,
@@ -22,13 +22,8 @@ import {
   FIELD_LAST_RECALLED_AT,
   computeContentHash,
 } from "./schema.js";
-import {
-  MilvusSearchManager,
-  createMilvusClient,
-  type MilvusSearchConfig,
-} from "./search.js";
-import { ensureCollectionReady } from "./collection-bootstrap.js";
-import { MEMORY_TYPES } from "./types.js";
+import { MilvusSearchManager, createMilvusClient, type MilvusSearchConfig } from "./search.js";
+import { MEMORY_TYPES, MEMORY_SOURCE_LABELS } from "./types.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -175,9 +170,7 @@ function chunkMarkdown(lines: string[]): FileChunk[] {
       chunkStartLine = lineNum;
     }
     // Strip list bullet marker
-    const content = /^[-*]\s+/.test(trimmed)
-      ? trimmed.replace(/^[-*]\s+/, "")
-      : trimmed;
+    const content = /^[-*]\s+/.test(trimmed) ? trimmed.replace(/^[-*]\s+/, "") : trimmed;
     chunkLines.push(content);
   }
 
@@ -232,7 +225,8 @@ export async function migrateMarkdownToMilvus(
     for (let ci = 0; ci < chunks.length; ci++) {
       const chunk = chunks[ci];
       const provenanceLabel = `${relPath}:${chunk.startLine}:${chunk.endLine}`;
-      const dKey = dedupKey(chunk.text, provenanceLabel);
+      // content_hash stored in Milvus uses MEMORY_SOURCE_LABELS.IMPORT as label
+      const dKey = dedupKey(chunk.text, MEMORY_SOURCE_LABELS.IMPORT);
 
       // In-batch dedup
       if (seenHashes.has(dKey)) {
@@ -269,7 +263,9 @@ export async function migrateMarkdownToMilvus(
             } as QueryReq);
             if (existing.data && existing.data.length > 0) {
               result.skipped++;
-              console.log(`[${ci + 1}/${chunks.length}] file=${relPath} action=skip:dup-cross-batch(label-fallback)`);
+              console.log(
+                `[${ci + 1}/${chunks.length}] file=${relPath} action=skip:dup-cross-batch(label-fallback)`,
+              );
               continue;
             }
           } catch {
@@ -293,13 +289,10 @@ export async function migrateMarkdownToMilvus(
           memoryType: MEMORY_TYPES.SHORT_TERM,
           provenance: {
             kind: "file",
-            label: provenanceLabel,
+            label: MEMORY_SOURCE_LABELS.IMPORT,
           },
         });
 
-        // We also need to set the source label to IMPORT via provenance
-        // But write() only sets provenance.kind/label, not source label.
-        // The IMPORT designation is tracked via provenance.label convention.
         result.inserted++;
         console.log(`[${ci + 1}/${chunks.length}] file=${relPath} action=insert`);
       } catch (err) {
@@ -352,9 +345,7 @@ export async function migrateMilvusToMarkdown(
   let hasMore = true;
 
   while (hasMore) {
-    const typeFilter = filterType !== "all"
-      ? `${FIELD_MEMORY_TYPE} == "${filterType}"`
-      : undefined;
+    const typeFilter = filterType !== "all" ? `${FIELD_MEMORY_TYPE} == "${filterType}"` : undefined;
 
     try {
       const response = await client.query({
@@ -441,10 +432,7 @@ export async function migrateMilvusToMarkdown(
 
   // memory/YYYY-MM-DD.md (grouped by date)
   for (const [date, rows] of dateGrouped.entries()) {
-    const lines: string[] = [
-      `## ${date}`,
-      "",
-    ];
+    const lines: string[] = [`## ${date}`, ""];
     for (const row of rows) {
       const text = String(row[FIELD_TEXT] ?? "");
       const memType = String(row[FIELD_MEMORY_TYPE] ?? "");
@@ -454,11 +442,7 @@ export async function migrateMilvusToMarkdown(
     }
     lines.push("");
 
-    await writeFile(
-      path.join(outputDir, "memory", `${date}.md`),
-      lines.join("\n"),
-      "utf-8",
-    );
+    await writeFile(path.join(outputDir, "memory", `${date}.md`), lines.join("\n"), "utf-8");
     result.files++;
     result.inserted += rows.length;
   }
@@ -476,10 +460,7 @@ export async function migrateMilvusToMarkdown(
  * Register the `migrate <dir>` subcommand on the commander program.
  * Called from index.ts via api.registerCli.
  */
-export function registerMigrationCli(
-  program: Command,
-  cfg: OpenClawConfig,
-): void {
+export function registerMigrationCli(program: Command, cfg: OpenClawConfig): void {
   program
     .command("migrate <dir>")
     .description("Migrate memory files between Markdown and Milvus")
@@ -497,9 +478,10 @@ export function registerMigrationCli(
 
       // Resolve agent ID from config (use "default" as fallback)
       const agentsDefaults = cfg.agents?.defaults;
-      const agentId = typeof agentsDefaults === "object" && agentsDefaults !== null
-        ? String((agentsDefaults as Record<string, unknown>).agentId ?? "default")
-        : "default";
+      const agentId =
+        typeof agentsDefaults === "object" && agentsDefaults !== null
+          ? String((agentsDefaults as Record<string, unknown>).agentId ?? "default")
+          : "default";
 
       try {
         // Validate input directory exists (forward mode only)
@@ -523,8 +505,12 @@ export function registerMigrationCli(
           process.exit(1);
         }
 
-        const milvus = (rawConfig as Record<string, unknown>).milvus as Record<string, unknown> | undefined;
-        const embedding = (rawConfig as Record<string, unknown>).embedding as Record<string, unknown> | undefined;
+        const milvus = (rawConfig as Record<string, unknown>).milvus as
+          | Record<string, unknown>
+          | undefined;
+        const embedding = (rawConfig as Record<string, unknown>).embedding as
+          | Record<string, unknown>
+          | undefined;
 
         const searchCfg: MilvusSearchConfig = {
           host: String(milvus?.host ?? "localhost"),
@@ -538,7 +524,7 @@ export function registerMigrationCli(
         };
 
         // Create Milvus client
-        const client = createMilvusClient(searchCfg.host, searchCfg.port);
+        const client = createMilvusClient(searchCfg);
 
         if (reverse) {
           // Reverse: Milvus → Markdown
@@ -549,9 +535,8 @@ export function registerMigrationCli(
           // Forward: Markdown → Milvus
           // For forward migration we need the embedding provider
           // Dynamic import to avoid loading heavy deps when not needed
-          const { getMemoryEmbeddingProvider } = await import(
-            "openclaw/plugin-sdk/memory-core-host-engine-embeddings"
-          );
+          const { getMemoryEmbeddingProvider } =
+            await import("openclaw/plugin-sdk/memory-core-host-engine-embeddings");
           const adapter = getMemoryEmbeddingProvider(searchCfg.embedding.provider, cfg);
           if (!adapter) {
             console.error(
@@ -560,9 +545,8 @@ export function registerMigrationCli(
             process.exit(1);
           }
 
-          const { resolveAgentWorkspaceDir } = await import(
-            "openclaw/plugin-sdk/memory-core-host-engine-foundation"
-          );
+          const { resolveAgentWorkspaceDir } =
+            await import("openclaw/plugin-sdk/memory-core-host-engine-foundation");
           const agentDir = resolveAgentWorkspaceDir(cfg, agentId);
 
           const providerResult = await adapter.create({

@@ -61,6 +61,12 @@ export interface MilvusSearchConfig {
   host: string;
   port: number;
   collectionName: string;
+  /** Milvus auth / connection (token, username+password, ssl, database) */
+  token?: string;
+  username?: string;
+  password?: string;
+  ssl?: boolean;
+  database?: string;
   embedding: {
     provider: string;
     model: string;
@@ -72,6 +78,12 @@ export interface MilvusSearchConfig {
     textWeight?: number;
     /** Enable native BM25 hybrid search when Milvus ≥ 2.4 has BM25 Function (default: false) */
     useBM25?: boolean;
+  };
+  /** Index configuration (default: metricType=COSINE) */
+  index?: {
+    metricType?: string;
+    hnswM?: number;
+    efConstruction?: number;
   };
 }
 
@@ -518,7 +530,7 @@ export class MilvusSearchManager {
 
     return response.results.map((r) => {
       const ref = rowToMemoryReference(r as unknown as Record<string, unknown>);
-      ref.score = normalizeVectorScore(r.score, "COSINE");
+      ref.score = normalizeVectorScore(r.score, this.cfg.index?.metricType ?? "COSINE");
       ref.vectorScore = ref.score;
       return ref;
     });
@@ -1434,7 +1446,7 @@ export class MilvusSearchManager {
 
   status(): MemoryProviderStatus {
     return {
-      backend: "qmd",
+      backend: "milvus",
       provider: this.cfg.embedding.provider,
       model: this.cfg.embedding.model,
       requestedProvider: this.cfg.embedding.provider,
@@ -1487,8 +1499,15 @@ export class MilvusSearchManager {
 
 // ── Factory ────────────────────────────────────────────────────────
 
-/** Create a MilvusClient instance. */
-export function createMilvusClient(host: string, port: number): MilvusClient {
-  const address = host.includes(":") ? host : `${host}:${port}`;
-  return new MilvusClient(address);
+/** Create a MilvusClient instance with optional auth / SSL / database. */
+export function createMilvusClient(cfg: MilvusSearchConfig): MilvusClient {
+  const address = cfg.host.includes(":") ? cfg.host : `${cfg.host}:${cfg.port}`;
+  return new MilvusClient({
+    address,
+    token: cfg.token,
+    username: cfg.username,
+    password: cfg.password,
+    ssl: cfg.ssl,
+    database: cfg.database,
+  });
 }
