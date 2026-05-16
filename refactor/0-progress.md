@@ -1192,3 +1192,20 @@ search()
 
 - 失败冷却（`OPEN_FAILURES` map + cooldown 期）：Alpha 阶段 Milvus 长时间宕机 + 高频请求场景不真实触发，单独迭代时再加
 - pool 专项单测（4 case：同 identity 复用 / 不同 agent 独立 / identity 切换关旧建新 / 并发 pending dedup）：现有 `register.test.ts` 已覆盖工厂注入路径，专项测试加入 P1 测试增强
+
+---
+
+### P0-3 修复: archive/applyPromotions 局部 upsert → query 全行后 upsert ✅ 完成
+
+**日期**：2026-05-14
+
+**问题**：`archive()` 和 `applyPromotions()` 归档步骤仅 upsert 3 个字段 `{id, memory_type, updated_at}`，Milvus `upsert` 按主键写入整行而非 SQL UPDATE，会清空 embedding/text/snippet/provenance 等全部其他字段，导致记录不可搜索、内容永久丢失。
+
+**修复**（2 处，均在 `extensions/memory-milvus/src/search.ts`）：
+
+| #   | 方法                         | 改动                                                                         |
+| --- | ---------------------------- | ---------------------------------------------------------------------------- |
+| 1   | `archive(id)`                | query 完整行 + query embedding → `entryToInsertData` 全字段 → upsert         |
+| 2   | `applyPromotions()` 归档步骤 | 复用已查到的 `entry` + query embedding → `entryToInsertData` 全字段 → upsert |
+
+**验证**：`npx vitest run extensions/memory-milvus` → 9 files / 134 tests 全过

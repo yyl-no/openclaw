@@ -7,7 +7,13 @@
  * - BM25 native hybrid search available when Milvus ≥ 2.4 has a BM25 Function
  */
 
-import { MilvusClient, type NumberArrayId, type QueryReq, type RowData, type SearchSimpleReq } from "@zilliz/milvus2-sdk-node";
+import {
+  MilvusClient,
+  type NumberArrayId,
+  type QueryReq,
+  type RowData,
+  type SearchSimpleReq,
+} from "@zilliz/milvus2-sdk-node";
 import type { MemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import type {
   MemoryEmbeddingProbeResult,
@@ -18,6 +24,7 @@ import type {
   MemorySearchRuntimeDebug,
   PromotionCandidate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { replayFallback, writeFallback } from "./fallback.js";
 import {
   FIELD_AGENT_ID,
   FIELD_CONTENT_HASH,
@@ -46,7 +53,6 @@ import {
   MEMORY_SOURCE_LABELS,
   MEMORY_TYPES,
 } from "./types.js";
-import { replayFallback, writeFallback } from "./fallback.js";
 import { warnOnce } from "./warn-once.js";
 
 // ── Config types ──────────────────────────────────────────────────
@@ -91,11 +97,12 @@ const VECTOR_FETCH_MULTIPLIER = 3;
  * the server-side BM25 Function handles actual tokenization and weighting.
  */
 function extractKeywords(query: string): string[] {
-  const tokens = query
-    .toLowerCase()
-    .match(/[\p{L}\p{N}_]+/gu)
-    ?.map((t) => t.trim())
-    .filter((t) => t.length >= 2) ?? [];
+  const tokens =
+    query
+      .toLowerCase()
+      .match(/[\p{L}\p{N}_]+/gu)
+      ?.map((t) => t.trim())
+      .filter((t) => t.length >= 2) ?? [];
   return [...new Set(tokens)];
 }
 
@@ -112,7 +119,8 @@ function buildKeywordFilter(keywords: string[], agentId?: string): string {
 
   if (keywords.length > 0) {
     const likeClauses = keywords.map(
-      (kw) => `${FIELD_TEXT} like "%${kw.replace(/%/g, "\\%").replace(/_/g, "\\_").replace(/"/g, '\\"')}%"`,
+      (kw) =>
+        `${FIELD_TEXT} like "%${kw.replace(/%/g, "\\%").replace(/_/g, "\\_").replace(/"/g, '\\"')}%"`,
     );
     parts.push(`(${likeClauses.join(" || ")})`);
   }
@@ -185,9 +193,7 @@ function computeTfIdfScores(
 
   // Compute IDF: doc frequency for each keyword
   for (const kw of queryKeywords) {
-    const docCount = docs.filter((d) =>
-      d.text.toLowerCase().includes(kw),
-    ).length;
+    const docCount = docs.filter((d) => d.text.toLowerCase().includes(kw)).length;
     // IDF = log(1 + N / df)
     idf.set(kw, Math.log(1 + totalDocs / Math.max(1, docCount)));
   }
@@ -287,11 +293,7 @@ function computePromotionScore(params: {
 /**
  * MMR re-ranking: balance relevance and diversity.
  */
-function applyMMR(
-  results: MemoryReference[],
-  lambda = 0.7,
-  maxResults: number,
-): MemoryReference[] {
+function applyMMR(results: MemoryReference[], lambda = 0.7, maxResults: number): MemoryReference[] {
   if (results.length <= 1) return results;
 
   const selected: MemoryReference[] = [];
@@ -417,15 +419,22 @@ export class MilvusSearchManager {
 
     if (useBM25 && hasVector) {
       const bm25Results = await this.searchBM25(
-        queryVec, cleaned, effectiveAgentId, fetchLimit, scalarFilter,
+        queryVec,
+        cleaned,
+        effectiveAgentId,
+        fetchLimit,
+        scalarFilter,
       );
       if (bm25Results !== null) {
         // Apply temporal decay (legacy path applies decay in mergeResults)
         merged = bm25Results.map((r) => ({
           ...r,
-          score: r.score * temporalDecayFactor(
-            (r as Record<string, unknown>)[FIELD_CREATED_AT] as string ?? "", 30,
-          ),
+          score:
+            r.score *
+            temporalDecayFactor(
+              ((r as Record<string, unknown>)[FIELD_CREATED_AT] as string) ?? "",
+              30,
+            ),
         }));
       }
       // null → fall back to legacy path
@@ -436,7 +445,12 @@ export class MilvusSearchManager {
       let vectorRefs: MemoryReference[] = [];
       if (hasVector) {
         try {
-          vectorRefs = await this.searchVector(queryVec, effectiveAgentId, fetchLimit, scalarFilter);
+          vectorRefs = await this.searchVector(
+            queryVec,
+            effectiveAgentId,
+            fetchLimit,
+            scalarFilter,
+          );
         } catch (err) {
           console.warn("[memory-milvus] vector search failed:", err);
         }
@@ -446,7 +460,12 @@ export class MilvusSearchManager {
       const keywords = extractKeywords(cleaned);
       if (keywords.length > 0) {
         try {
-          keywordRefs = await this.searchKeyword(keywords, effectiveAgentId, fetchLimit, scalarFilter);
+          keywordRefs = await this.searchKeyword(
+            keywords,
+            effectiveAgentId,
+            fetchLimit,
+            scalarFilter,
+          );
         } catch (err) {
           console.warn("[memory-milvus] keyword search failed:", err);
         }
@@ -461,9 +480,7 @@ export class MilvusSearchManager {
     const mmrResults = applyMMR(merged, 0.7, maxResults * 2);
 
     // 5. Filter, sort, truncate
-    return mmrResults
-      .filter((r) => r.score >= minScore)
-      .slice(0, maxResults);
+    return mmrResults.filter((r) => r.score >= minScore).slice(0, maxResults);
   }
 
   // ── Vector search ────────────────────────────────────────────
@@ -523,9 +540,13 @@ export class MilvusSearchManager {
     const request: QueryReq = {
       collection_name: this.collectionName,
       filter,
-      output_fields: [FIELD_ID, FIELD_TEXT, FIELD_SNIPPET, FIELD_CREATED_AT, ...OUTPUT_FIELDS.filter(
-        (f) => f !== FIELD_ID && f !== FIELD_TEXT && f !== FIELD_SNIPPET,
-      )],
+      output_fields: [
+        FIELD_ID,
+        FIELD_TEXT,
+        FIELD_SNIPPET,
+        FIELD_CREATED_AT,
+        ...OUTPUT_FIELDS.filter((f) => f !== FIELD_ID && f !== FIELD_TEXT && f !== FIELD_SNIPPET),
+      ],
       limit,
     };
 
@@ -635,10 +656,7 @@ export class MilvusSearchManager {
    * Used for data collection phases (light/REM dreaming) where we
    * need to list all records matching a filter without a search query.
    */
-  private async queryByFilter(
-    filter: string,
-    limit: number,
-  ): Promise<MemoryReference[]> {
+  private async queryByFilter(filter: string, limit: number): Promise<MemoryReference[]> {
     const request: QueryReq = {
       collection_name: this.collectionName,
       filter,
@@ -683,7 +701,8 @@ export class MilvusSearchManager {
       const existing = byId.get(r.id);
       if (existing) {
         existing.textScore = r.textScore ?? r.score;
-        existing.score = vectorWeight * (existing.vectorScore ?? 0) + textWeight * (r.textScore ?? r.score);
+        existing.score =
+          vectorWeight * (existing.vectorScore ?? 0) + textWeight * (r.textScore ?? r.score);
         // Prefer the keyword-matched snippet (more relevant)
         if (r.snippet && r.snippet.length > (existing.snippet?.length ?? 0)) {
           existing.snippet = r.snippet;
@@ -701,7 +720,7 @@ export class MilvusSearchManager {
     const results: MemoryReference[] = [];
     for (const [, ref] of byId) {
       const decay = temporalDecayFactor(
-        (ref as Record<string, unknown>)[FIELD_CREATED_AT] as string ?? "",
+        ((ref as Record<string, unknown>)[FIELD_CREATED_AT] as string) ?? "",
         30,
       );
       results.push({ ...ref, score: ref.score * decay });
@@ -714,7 +733,11 @@ export class MilvusSearchManager {
 
   // ── Read by ID ──────────────────────────────────────────────
 
-  async readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult> {
+  async readFile(params: {
+    relPath: string;
+    from?: number;
+    lines?: number;
+  }): Promise<MemoryReadResult> {
     if (this.closed) throw new Error("MilvusSearchManager is closed");
 
     // In the milvus backend, relPath is interpreted as a memory id
@@ -830,7 +853,7 @@ export class MilvusSearchManager {
       snippet: patch.snippet ?? existing.snippet,
       agentId: existing.agentId,
       sessionKey: patch.sessionKey !== undefined ? patch.sessionKey : existing.sessionKey,
-      memoryType: patch.memoryType as MemoryEntry["memoryType"] ?? existing.memoryType,
+      memoryType: (patch.memoryType as MemoryEntry["memoryType"]) ?? existing.memoryType,
       recallCount: existing.recallCount,
       createdAt: existing.createdAt,
       updatedAt: now,
@@ -842,7 +865,8 @@ export class MilvusSearchManager {
 
     // Step 3: re-embed if text changed, else reuse existing embedding
     const textChanged = patch.text !== undefined && patch.text !== existing.text;
-    const needsReembed = textChanged ||
+    const needsReembed =
+      textChanged ||
       (patch.provenanceLabel !== undefined && patch.provenanceLabel !== existing.provenance.label);
 
     let vector: number[];
@@ -899,14 +923,37 @@ export class MilvusSearchManager {
     const rawId = id.trim();
     if (!rawId) throw new Error("Missing memory id");
 
+    // Query existing row to preserve all fields (Milvus upsert writes full rows)
+    const existing = await this.get(rawId);
+
+    // Query embedding vector (excluded from get() output fields)
+    const embResponse = await this.client.query({
+      collection_name: this.collectionName,
+      filter: `${FIELD_ID} == ${rawId}`,
+      output_fields: [FIELD_EMBEDDING, FIELD_CONTENT_HASH],
+      limit: 1,
+    });
+    const embRow = embResponse.data?.[0] as Record<string, unknown> | undefined;
+
     const now = new Date().toISOString();
+    const data = entryToInsertData({
+      text: existing.text,
+      snippet: existing.snippet,
+      agentId: existing.agentId,
+      sessionKey: existing.sessionKey,
+      memoryType: MEMORY_TYPES.ARCHIVED,
+      recallCount: existing.recallCount,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+      provenance: existing.provenance,
+    });
+    data[FIELD_ID] = Number(rawId);
+    data[FIELD_EMBEDDING] = (embRow?.[FIELD_EMBEDDING] as number[]) ?? [];
+    data[FIELD_CONTENT_HASH] = String(embRow?.[FIELD_CONTENT_HASH] ?? "");
+
     await this.client.upsert({
       collection_name: this.collectionName,
-      data: [{
-        [FIELD_ID]: Number(rawId),
-        [FIELD_MEMORY_TYPE]: "archived",
-        [FIELD_UPDATED_AT]: now,
-      }] as unknown as RowData[],
+      data: [data as unknown as RowData],
     });
   }
 
@@ -979,9 +1026,7 @@ export class MilvusSearchManager {
    * Checks content_hash for dedup before insertion — if a matching
    * entry already exists, returns it without re-embedding/inserting.
    */
-  private async insertEntry(
-    entry: Omit<MemoryEntry, "id">,
-  ): Promise<MemoryReference> {
+  private async insertEntry(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
     // Dedup: check content_hash before insert
     const contentHash = computeContentHash(entry.text, entry.provenance?.label);
     const existingRef = await this.findByContentHash(contentHash);
@@ -1055,9 +1100,7 @@ export class MilvusSearchManager {
   // ── Write fallback ──────────────────────────────────────────────
 
   /** Write to NDJSON fallback; return placeholder MemoryReference. */
-  private async fallbackWrite(
-    entry: Omit<MemoryEntry, "id">,
-  ): Promise<MemoryReference> {
+  private async fallbackWrite(entry: Omit<MemoryEntry, "id">): Promise<MemoryReference> {
     await writeFallback(this.workspaceDir, entry).catch((err) => {
       console.warn("[memory-milvus] writeFallback also failed:", (err as Error).message);
     });
@@ -1133,9 +1176,8 @@ export class MilvusSearchManager {
       const upsertRows: Record<string, unknown>[] = [];
       for (const id of ids) {
         const existing = existingMap.get(id);
-        const prevCount = existing?.[FIELD_RECALL_COUNT] != null
-          ? Number(existing[FIELD_RECALL_COUNT])
-          : 0;
+        const prevCount =
+          existing?.[FIELD_RECALL_COUNT] != null ? Number(existing[FIELD_RECALL_COUNT]) : 0;
 
         const row: Record<string, unknown> = {
           [FIELD_ID]: id,
@@ -1237,15 +1279,33 @@ export class MilvusSearchManager {
           },
         });
 
-        // 3. Archive original short_term (upsert memory_type → archived)
+        // 3. Archive original short_term — query embedding, then upsert full row
         const now = new Date().toISOString();
+        const embResponse = await this.client.query({
+          collection_name: this.collectionName,
+          filter: `${FIELD_ID} == ${candidate.id}`,
+          output_fields: [FIELD_EMBEDDING, FIELD_CONTENT_HASH],
+          limit: 1,
+        });
+        const embRow = embResponse.data?.[0] as Record<string, unknown> | undefined;
+        const archiveData = entryToInsertData({
+          text: entry.text,
+          snippet: entry.snippet,
+          agentId: entry.agentId,
+          sessionKey: entry.sessionKey,
+          memoryType: MEMORY_TYPES.ARCHIVED,
+          recallCount: entry.recallCount,
+          createdAt: entry.createdAt,
+          updatedAt: now,
+          provenance: entry.provenance,
+        });
+        archiveData[FIELD_ID] = candidate.id;
+        archiveData[FIELD_EMBEDDING] = (embRow?.[FIELD_EMBEDDING] as number[]) ?? [];
+        archiveData[FIELD_CONTENT_HASH] = String(embRow?.[FIELD_CONTENT_HASH] ?? "");
+
         await this.client.upsert({
           collection_name: this.collectionName,
-          data: [{
-            [FIELD_ID]: candidate.id,
-            [FIELD_MEMORY_TYPE]: MEMORY_TYPES.ARCHIVED,
-            [FIELD_UPDATED_AT]: now,
-          }] as unknown as RowData[],
+          data: [archiveData as unknown as RowData],
         });
 
         appliedCandidates.push(candidate);
