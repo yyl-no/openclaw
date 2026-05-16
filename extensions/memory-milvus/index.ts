@@ -5,49 +5,32 @@
  * Switching backends is a single config change: plugins.slots.memory.
  */
 
-import {
-  type MemoryFlushPlan,
-  type MemoryPluginRuntime,
-} from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { registerBuiltInMemoryEmbeddingProviders } from "openclaw/plugin-sdk/memory-core-bundled-runtime";
 import {
   getMemoryEmbeddingProvider,
   type MemoryEmbeddingProvider,
 } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import { resolveAgentWorkspaceDir } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import {
-  definePluginEntry,
-  type OpenClawPluginApi,
-} from "openclaw/plugin-sdk/plugin-entry";
-import { createRequire } from "module";
-const _require = createRequire(import.meta.url);
-// Runtime: load bundled memory-core-bundled-runtime from the openclaw npm package dist.
-// Path varies by install location and build hash — replace with the actual dist path on deploy.
-const _bundled = _require("/home/yl/.npm-global/lib/node_modules/openclaw/dist/memory-core-bundled-runtime-BcwkfmWM.js");
-const registerBuiltInMemoryEmbeddingProviders = _bundled.r ?? _bundled.registerBuiltInMemoryEmbeddingProviders;
-import { DEFAULT_COLLECTION_NAME } from "./src/schema.js";
-import {
-  MilvusSearchManager,
-  createMilvusClient,
-  type MilvusSearchConfig,
-} from "./src/search.js";
+  type MemoryFlushPlan,
+  type MemoryPluginRuntime,
+} from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { ensureCollectionReady } from "./src/collection-bootstrap.js";
+import { setDreamingManagerResolver, registerShortTermPromotionDreaming } from "./src/dreaming.js";
+import { DEFAULT_COLLECTION_NAME } from "./src/schema.js";
+import { MilvusSearchManager, createMilvusClient, type MilvusSearchConfig } from "./src/search.js";
+import { createMemoryGetTool } from "./src/tools.get.js";
 import { createMemoryWriteTool } from "./src/tools.js";
 import { createMemorySearchTool } from "./src/tools.search.js";
-import { createMemoryGetTool } from "./src/tools.get.js";
-import {
-  setDreamingManagerResolver,
-  registerShortTermPromotionDreaming,
-} from "./src/dreaming.js";
 
 // ── Prompt Builder ─────────────────────────────────────────────────
 
 /**
  * Build the system prompt section describing Milvus memory tools.
  */
-function buildPromptSection(params: {
-  availableTools: Set<string>;
-}): string[] {
+function buildPromptSection(params: { availableTools: Set<string> }): string[] {
   const tools: string[] = [];
   if (params.availableTools.has("memory_search")) tools.push("memory_search");
   if (params.availableTools.has("memory_get")) tools.push("memory_get");
@@ -105,8 +88,7 @@ function parseMilvusConfig(raw: Record<string, unknown>): MilvusSearchConfig {
     embedding: {
       provider: String(embedding.provider ?? "auto"),
       model: String(embedding.model ?? "text-embedding-v3"),
-      dimensions:
-        embedding.dimensions != null ? Number(embedding.dimensions) : undefined,
+      dimensions: embedding.dimensions != null ? Number(embedding.dimensions) : undefined,
     },
   };
 }
@@ -123,12 +105,15 @@ async function createEmbeddingProvider(
   const adapter = getMemoryEmbeddingProvider(providerId, cfg);
   if (!adapter) {
     throw new Error(
-      `Unknown memory embedding provider: ${providerId}. Known providers: ${
-        ["auto", "local", "alibaba", "openai"]
-          .map((id) => (getMemoryEmbeddingProvider(id, cfg) ? id : null))
-          .filter(Boolean)
-          .join(", ")
-      }`,
+      `Unknown memory embedding provider: ${providerId}. Known providers: ${[
+        "auto",
+        "local",
+        "alibaba",
+        "openai",
+      ]
+        .map((id) => (getMemoryEmbeddingProvider(id, cfg) ? id : null))
+        .filter(Boolean)
+        .join(", ")}`,
     );
   }
 
@@ -168,7 +153,7 @@ const milvusRuntime: MemoryPluginRuntime = {
         return {
           manager: null,
           error:
-            "memory-milvus plugin config not found. Set plugins.entries[\"memory-milvus\"].config in openclaw config.",
+            'memory-milvus plugin config not found. Set plugins.entries["memory-milvus"].config in openclaw config.',
         };
       }
 
@@ -277,9 +262,7 @@ export default definePluginEntry({
       if (activeManager && !activeManager.degraded) return activeManager;
       const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
       if (!result.manager && result.error) {
-        api.logger.warn(
-          `memory-milvus: dreaming manager lazy-init failed: ${result.error}`,
-        );
+        api.logger.warn(`memory-milvus: dreaming manager lazy-init failed: ${result.error}`);
       }
       return result.manager as MilvusSearchManager | null;
     });

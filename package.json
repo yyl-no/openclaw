@@ -1003,6 +1003,10 @@
       "types": "./dist/plugin-sdk/qa-runner-runtime.d.ts",
       "default": "./dist/plugin-sdk/qa-runner-runtime.js"
     },
+    "./plugin-sdk/memory-core-bundled-runtime": {
+      "types": "./dist/plugin-sdk/memory-core-bundled-runtime.d.ts",
+      "default": "./dist/plugin-sdk/memory-core-bundled-runtime.js"
+    },
     "./plugin-sdk/memory-core-engine-runtime": {
       "types": "./dist/plugin-sdk/memory-core-engine-runtime.d.ts",
       "default": "./dist/plugin-sdk/memory-core-engine-runtime.js"
