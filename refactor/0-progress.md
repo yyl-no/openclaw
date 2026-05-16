@@ -1226,3 +1226,21 @@ search()
 | 2   | `src/search.test.ts` | 旧测试断言残缺行存在 → 新测试断言不存在 ID 被跳过、全字段保留                                                                                                          |
 
 **验证**：`npx vitest run extensions/memory-milvus` → 9 files / 134 tests 全过
+
+---
+
+### P0-5 修复: memory-core lazy memory_write 工具 schema 错配 ✅ 完成
+
+**日期**：2026-05-14
+
+**问题**：`createLazyMemoryWriteTool()` 对 AI 暴露了错误的 `MemoryGetSchema`（`{path, from, lines, corpus}` 而非 `{text, label}`），且 `name` 用 `as "memory_search"` 绕过类型检查。
+
+**修复**（1 文件，3 处）：
+
+| #   | 文件       | 改动                                                                                                        |
+| --- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| 1   | `index.ts` | 新增 `MemoryWriteSchema`（`{text, label}`）                                                                 |
+| 2   | `index.ts` | `createLazyMemoryTool` 签名：`name` 联合类型加 `"memory_write"`，`parameters` 加 `typeof MemoryWriteSchema` |
+| 3   | `index.ts` | `createLazyMemoryWriteTool`：移除 `as "memory_search"` 强转，`parameters` 改用 `MemoryWriteSchema`          |
+
+**验证**：`npx vitest run extensions/memory-milvus extensions/memory-core/src/tools.test.ts` → 10 files / 139 tests 全过

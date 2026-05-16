@@ -1,3 +1,4 @@
+import { resolveMemoryBackendConfig } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   jsonResult,
   resolveMemorySearchConfig,
@@ -5,7 +6,6 @@ import {
   type MemoryPluginRuntime,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import { resolveMemoryBackendConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import {
   definePluginEntry,
   type AnyAgentTool,
@@ -82,12 +82,22 @@ const MemoryGetSchema = {
   additionalProperties: false,
 } as const satisfies TSchema;
 
+const MemoryWriteSchema = {
+  type: "object",
+  properties: {
+    text: { type: "string" },
+    label: { type: "string" },
+  },
+  required: ["text"],
+  additionalProperties: false,
+} as const satisfies TSchema;
+
 function createLazyMemoryTool(params: {
   options: MemoryToolOptions;
   label: string;
-  name: "memory_search" | "memory_get";
+  name: "memory_search" | "memory_get" | "memory_write";
   description: string;
-  parameters: typeof MemorySearchSchema | typeof MemoryGetSchema;
+  parameters: typeof MemorySearchSchema | typeof MemoryGetSchema | typeof MemoryWriteSchema;
   load: (module: MemoryToolsModule, options: MemoryToolOptions) => AnyAgentTool | null;
 }): AnyAgentTool | null {
   if (!hasMemoryToolContext(params.options)) {
@@ -147,12 +157,12 @@ function createLazyMemoryWriteTool(options: MemoryToolOptions): AnyAgentTool | n
   return createLazyMemoryTool({
     options,
     label: "Memory Write",
-    name: "memory_write" as "memory_search",
+    name: "memory_write",
     description:
       "Write a memory entry extracted from the conversation. " +
       "Use this to persist facts, decisions, preferences, and learnings. " +
       "Each entry is stored with text content and an optional source label.",
-    parameters: MemoryGetSchema,
+    parameters: MemoryWriteSchema,
     load: (module, loadOptions) => module.createMemoryWriteTool(loadOptions),
   });
 }
