@@ -1147,3 +1147,48 @@ search()
 - 跨机器/CI/Docker/npm 安装均能解析（不再依赖 `/home/yl/...` 绝对路径）
 - 不再受 dist chunk hash 文件名（如 `-BcwkfmWM.js` / `-CZSvNrt3.js`）影响
 - 符合 AGENTS.md "plugins cross into core only via `openclaw/plugin-sdk/*`" 边界规则
+
+---
+
+### P0-2 修复: 全局单例 activeManager → Manager Pool + Pending 去重 ✅ 完成
+
+**日期**：2026-05-12
+
+**问题**：入口持有单一全局 `let activeManager: MilvusSearchManager | null = null`，每次 `getMemorySearchManager(params)` 都覆盖该变量，三个 tool 注册时也通过 `() => activeManager` 闭包 capture 此全局。后果：
+
+1. 多 agent 并发时后初始化覆盖前一个 → 工具拿错 manager
+2. `closeAllMemorySearchManagers()` 只关最后一个 → 此前 manager 连接泄漏
+3. cron / dreaming / channel 会话并发时操作错误 agent 的记忆库
+4. degraded 状态会污染同 process 内其他 agent
+
+**根因**：缺少 memory-core 黄金参考的两层标准模式：(a) `(ctx) => factory(...)` 工厂回调让 tool 知道当前 agentId / cfg；(b) `Map<scopeKey, entry>` 按 agent 维度做 manager pool。
+
+**修复**（折中方案：Pool + Pending，**不含**失败冷却）：
+
+| #   | 动作                                                                                                                                                                                          | 文件                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| 1   | 新增 `managerPool: Map<scopeKey, ManagerPoolEntry>`、`pendingCreates: Map<scopeKey, Promise>`，配套 `normalizeAgentId` / `buildScopeKey` / `buildIdentityKey` / `buildMilvusManager` 辅助函数 | `extensions/memory-milvus/index.ts` |
+| 2   | 重写 `milvusRuntime.getMemorySearchManager`：cache hit → identity-mismatch evict+close → pending dedup → build with pending registration（try/finally 确保清理）                              | 同上                                |
+| 3   | `closeAllMemorySearchManagers` 改为遍历 `managerPool.values()` 全部关并清空                                                                                                                   | 同上                                |
+| 4   | 三个 `api.registerTool` 改为 `(ctx: OpenClawPluginToolContext) => factory(...)` 工厂回调，新增 `makeGetManager(ctx)` 每次 tool 执行时按当前 ctx 取 cfg/agentId 走 pool                        | 同上                                |
+| 5   | `setDreamingManagerResolver` 简化为 thin wrapper（pool 已处理 cache / identity / 并发）                                                                                                       | 同上                                |
+| 6   | 删除全局 `let activeManager: MilvusSearchManager \| null = null`                                                                                                                              | 同上                                |
+| 7   | `MemoryWriteToolDeps.getManager` 签名异步化为 `() => Manager \| Promise<Manager \| null> \| null`，`execute` 内 `await Promise.resolve(deps.getManager())`                                    | `src/tools.ts`                      |
+| 8   | 同上签名异步化                                                                                                                                                                                | `src/tools.search.ts`               |
+| 9   | 同上签名异步化                                                                                                                                                                                | `src/tools.get.ts`                  |
+
+**identityKey 维度**：`agentId + host + port + collectionName + embedding.{provider,model,dimensions}` —— 任一变更触发关旧建新，索引参数（efConstruction 等）刻意不纳入（应走 `openclaw doctor --fix` 而非自动重建）。
+
+**Pending 去重价值**：dreaming cron + 用户 `memory_search` 在冷启动同 scope 同时触发 lazy-init 不会建两个 manager；后到者 await 同一 promise，identity 一致直接复用、不一致则继续 fall through 到 fresh build。`try/finally` 保证 pending 清理，失败也不残留。
+
+**测试与验证**：
+
+- `pnpm tsgo:extensions` → 0 错误
+- `pnpm test extensions/memory-milvus --run` → **9 files / 134 tests 全过**（含 `register.test.ts` 工具注册端到端 + 三个 tools 异步签名兼容）
+- `pnpm build` → 全绿，`OK: All 4 required plugin-sdk exports verified.`
+- 测试文件无需修改：原有同步返回 `getManager: () => ({...})` 写法被新签名 `() => A | Promise<A | null> | null` 兼容
+
+**未做项（暂留 P1）**：
+
+- 失败冷却（`OPEN_FAILURES` map + cooldown 期）：Alpha 阶段 Milvus 长时间宕机 + 高频请求场景不真实触发，单独迭代时再加
+- pool 专项单测（4 case：同 identity 复用 / 不同 agent 独立 / identity 切换关旧建新 / 并发 pending dedup）：现有 `register.test.ts` 已覆盖工厂注入路径，专项测试加入 P1 测试增强

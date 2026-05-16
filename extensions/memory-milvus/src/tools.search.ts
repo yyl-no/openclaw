@@ -1,5 +1,6 @@
 /** `memory_search` tool for the Milvus backend — hybrid vector + keyword search. */
 
+import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   decorateCitations,
   filterMemorySearchHitsBySessionVisibility,
@@ -10,7 +11,6 @@ import {
   type MemoryCorpusSearchResult,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import type { MemoryReference } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
 // ── Supplement search ─────────────────────────────────────────────
@@ -33,9 +33,7 @@ async function searchSupplements(params: {
   }
   const results = (
     await Promise.all(
-      supplements.map(async (registration) =>
-        registration.supplement.search(params),
-      ),
+      supplements.map(async (registration) => registration.supplement.search(params)),
     )
   ).flat();
   return results
@@ -132,22 +130,28 @@ const MEMORY_SEARCH_DESCRIPTION =
 
 // ── Deps ──────────────────────────────────────────────────────────
 
+type MemorySearchManager = {
+  search(
+    query: string,
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      sessionKey?: string;
+      agentId?: string;
+    },
+  ): Promise<MemoryReference[]>;
+  recordRecall?(
+    refs: MemoryReference[],
+    context?: { query: string; timezone?: string },
+  ): Promise<void>;
+};
+
 export interface MemorySearchToolDeps {
-  getManager: () => {
-    search(
-      query: string,
-      opts?: {
-        maxResults?: number;
-        minScore?: number;
-        sessionKey?: string;
-        agentId?: string;
-      },
-    ): Promise<MemoryReference[]>;
-    recordRecall?(
-      refs: MemoryReference[],
-      context?: { query: string; timezone?: string },
-    ): Promise<void>;
-  } | null;
+  /**
+   * Resolve the active MilvusSearchManager.
+   * May return synchronously (tests) or asynchronously (runtime: lazy pool lookup).
+   */
+  getManager: () => MemorySearchManager | Promise<MemorySearchManager | null> | null;
   cfg?: OpenClawConfig;
   agentSessionKey?: string;
   sandboxed?: boolean;
@@ -168,107 +172,106 @@ export function createMemorySearchTool(deps: MemorySearchToolDeps): AnyAgentTool
         return jsonResult({ error: "query is required and must be a non-empty string" });
       }
 
-      const maxResults =
-        typeof params.maxResults === "number" ? params.maxResults : undefined;
-      const minScore =
-        typeof params.minScore === "number" ? params.minScore : undefined;
+      const maxResults = typeof params.maxResults === "number" ? params.maxResults : undefined;
+      const minScore = typeof params.minScore === "number" ? params.minScore : undefined;
       const corpus = typeof params.corpus === "string" ? params.corpus : "memory";
 
       try {
+        // Corpus routing (aligned with memory-core createMemorySearchTool)
+        const shouldQueryMilvus = corpus !== "wiki";
+        const shouldQuerySupplements = corpus === "wiki" || corpus === "all";
 
-      // Corpus routing (aligned with memory-core createMemorySearchTool)
-      const shouldQueryMilvus = corpus !== "wiki";
-      const shouldQuerySupplements = corpus === "wiki" || corpus === "all";
+        const manager = await Promise.resolve(deps.getManager());
 
-      const manager = deps.getManager();
+        // Search milvus (when needed) and supplements in parallel
+        let [milvusRaw, supplementResults] = await Promise.all([
+          (async () => {
+            if (!shouldQueryMilvus) return [] as MemoryReference[];
+            if (!manager) {
+              throw new Error(
+                "Milvus search manager is not initialized. Ensure the memory-milvus plugin is configured and the Milvus server is reachable.",
+              );
+            }
+            return await manager.search(query, {
+              maxResults,
+              minScore,
+              sessionKey: deps.agentSessionKey,
+            });
+          })(),
+          (async () => {
+            if (!shouldQuerySupplements) return [] as MemoryCorpusSearchResult[];
+            return await searchSupplements({
+              query,
+              maxResults,
+              agentSessionKey: deps.agentSessionKey,
+              corpus: corpus as "wiki" | "all" | undefined,
+            });
+          })(),
+        ]);
 
-      // Search milvus (when needed) and supplements in parallel
-      let [milvusRaw, supplementResults] = await Promise.all([
-        (async () => {
-          if (!shouldQueryMilvus) return [] as MemoryReference[];
-          if (!manager) {
-            throw new Error(
-              "Milvus search manager is not initialized. Ensure the memory-milvus plugin is configured and the Milvus server is reachable.",
-            );
-          }
-          return await manager.search(query, {
-            maxResults,
-            minScore,
+        // Session visibility filtering on milvus hits (before building results)
+        if (milvusRaw.length > 0 && deps.cfg) {
+          milvusRaw = await filterMemorySearchHitsBySessionVisibility({
+            cfg: deps.cfg,
+            requesterSessionKey: deps.agentSessionKey,
+            sandboxed: deps.sandboxed === true,
+            hits: milvusRaw,
+          });
+        }
+
+        // Build results
+        const isMultiCorpus = shouldQueryMilvus && shouldQuerySupplements;
+        let results: Array<
+          Record<string, unknown> & { corpus: string; score: number; path: string }
+        >;
+
+        if (isMultiCorpus) {
+          // corpus=all: merge milvus + wiki supplements with unified scoring
+          results = mergeMultiCorpusResults({
+            milvusResults: milvusRaw,
+            supplementResults,
+            maxResults: Math.max(1, maxResults ?? 10),
+          });
+        } else if (corpus === "wiki") {
+          // corpus=wiki: supplements only
+          results = supplementResults.map(supplementHitToResult);
+        } else {
+          // corpus=memory/sessions: milvus only
+          results = milvusRaw.map((r) => ({
+            ...r,
+            corpus: (corpus === "sessions" ? "sessions" : "memory") as string,
+            path: r.provenance?.label ?? r.id ?? "",
+          }));
+        }
+
+        // Citation decoration on results (skip for wiki-only corpus)
+        if (corpus !== "wiki") {
+          const cfg = deps.cfg;
+          const citationMode = cfg ? resolveMemoryCitationsMode(cfg) : "auto";
+          const includeCitations = shouldIncludeCitations({
+            mode: citationMode,
             sessionKey: deps.agentSessionKey,
           });
-        })(),
-        (async () => {
-          if (!shouldQuerySupplements) return [] as MemoryCorpusSearchResult[];
-          return await searchSupplements({
-            query,
-            maxResults,
-            agentSessionKey: deps.agentSessionKey,
-            corpus: corpus as "wiki" | "all" | undefined,
-          });
-        })(),
-      ]);
+          results = decorateCitations(results, includeCitations);
+        }
 
-      // Session visibility filtering on milvus hits (before building results)
-      if (milvusRaw.length > 0 && deps.cfg) {
-        milvusRaw = await filterMemorySearchHitsBySessionVisibility({
-          cfg: deps.cfg,
-          requesterSessionKey: deps.agentSessionKey,
-          sandboxed: deps.sandboxed === true,
-          hits: milvusRaw,
+        // Record recall hook (milvus hits only, fire-and-forget)
+        if (milvusRaw.length > 0 && manager?.recordRecall) {
+          void manager.recordRecall(milvusRaw, { query }).catch(() => {});
+        }
+
+        // Determine output corpus label
+        const outputCorpus =
+          corpus === "all" ? "all" : corpus === "wiki" ? "wiki" : corpus || "memory";
+
+        return jsonResult({
+          results,
+          corpus: outputCorpus,
+          ...(supplementResults.length > 0 ? { supplementCount: supplementResults.length } : {}),
         });
+      } catch (err) {
+        return jsonResult({ error: (err as Error).message });
       }
-
-      // Build results
-      const isMultiCorpus = shouldQueryMilvus && shouldQuerySupplements;
-      let results: Array<Record<string, unknown> & { corpus: string; score: number; path: string }>;
-
-      if (isMultiCorpus) {
-        // corpus=all: merge milvus + wiki supplements with unified scoring
-        results = mergeMultiCorpusResults({
-          milvusResults: milvusRaw,
-          supplementResults,
-          maxResults: Math.max(1, maxResults ?? 10),
-        });
-      } else if (corpus === "wiki") {
-        // corpus=wiki: supplements only
-        results = supplementResults.map(supplementHitToResult);
-      } else {
-        // corpus=memory/sessions: milvus only
-        results = milvusRaw.map((r) => ({
-          ...r,
-          corpus: (corpus === "sessions" ? "sessions" : "memory") as string,
-          path: r.provenance?.label ?? r.id ?? "",
-        }));
-      }
-
-      // Citation decoration on results (skip for wiki-only corpus)
-      if (corpus !== "wiki") {
-        const cfg = deps.cfg;
-        const citationMode = cfg ? resolveMemoryCitationsMode(cfg) : "auto";
-        const includeCitations = shouldIncludeCitations({
-          mode: citationMode,
-          sessionKey: deps.agentSessionKey,
-        });
-        results = decorateCitations(results, includeCitations);
-      }
-
-      // Record recall hook (milvus hits only, fire-and-forget)
-      if (milvusRaw.length > 0 && manager?.recordRecall) {
-        void manager.recordRecall(milvusRaw, { query }).catch(() => {});
-      }
-
-      // Determine output corpus label
-      const outputCorpus =
-        corpus === "all" ? "all" : corpus === "wiki" ? "wiki" : corpus || "memory";
-
-      return jsonResult({
-        results,
-        corpus: outputCorpus,
-        ...(supplementResults.length > 0 ? { supplementCount: supplementResults.length } : {}),
-      });
-    } catch (err) {
-      return jsonResult({ error: (err as Error).message });
-    }
     },
   };
 }

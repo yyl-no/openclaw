@@ -1,7 +1,7 @@
 /** `memory_get` tool for the Milvus backend — retrieves a full entry by PK id. */
 
-import { jsonResult } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemoryEntry } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
+import { jsonResult } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
 // ── Schema ────────────────────────────────────────────────────────
@@ -42,10 +42,16 @@ const MEMORY_GET_DESCRIPTION =
 
 // ── Deps ──────────────────────────────────────────────────────────
 
+type MemoryGetManager = {
+  get(id: string): Promise<MemoryEntry>;
+};
+
 export interface MemoryGetToolDeps {
-  getManager: () => {
-    get(id: string): Promise<MemoryEntry>;
-  } | null;
+  /**
+   * Resolve the active MilvusSearchManager.
+   * May return synchronously (tests) or asynchronously (runtime: lazy pool lookup).
+   */
+  getManager: () => MemoryGetManager | Promise<MemoryGetManager | null> | null;
 }
 
 // ── Factory ───────────────────────────────────────────────────────
@@ -64,7 +70,7 @@ export function createMemoryGetTool(deps: MemoryGetToolDeps): AnyAgentTool {
         return jsonResult({ error: "id is required for milvus backend memory retrieval" });
       }
 
-      const manager = deps.getManager();
+      const manager = await Promise.resolve(deps.getManager());
       if (!manager) {
         return jsonResult({
           error:

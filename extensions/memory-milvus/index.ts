@@ -16,7 +16,11 @@ import {
   type MemoryFlushPlan,
   type MemoryPluginRuntime,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  definePluginEntry,
+  type OpenClawPluginApi,
+  type OpenClawPluginToolContext,
+} from "openclaw/plugin-sdk/plugin-entry";
 import { ensureCollectionReady } from "./src/collection-bootstrap.js";
 import { setDreamingManagerResolver, registerShortTermPromotionDreaming } from "./src/dreaming.js";
 import { DEFAULT_COLLECTION_NAME } from "./src/schema.js";
@@ -135,76 +139,164 @@ async function createEmbeddingProvider(
   return result.provider;
 }
 
-// ── Runtime ────────────────────────────────────────────────────────
+// ── Manager Pool ───────────────────────────────────────────────────
 
-/** Hold the active search manager reference for closeAllMemorySearchManagers. */
-let activeManager: MilvusSearchManager | null = null;
+interface ManagerPoolEntry {
+  identityKey: string;
+  manager: MilvusSearchManager;
+}
+
+/** scope-keyed cache of live MilvusSearchManager instances. Key: normalized agentId. */
+const managerPool = new Map<string, ManagerPoolEntry>();
+
+/**
+ * Pending creates indexed by scopeKey to deduplicate concurrent first-time
+ * lookups. Without this, dreaming cron + a user-triggered memory_search hitting
+ * lazy-init at the same time would build two managers, leak one connection,
+ * and bootstrap the collection twice.
+ */
+const pendingCreates = new Map<string, Promise<ManagerPoolEntry | null>>();
+
+function normalizeAgentId(agentId: string | undefined | null): string {
+  const trimmed = (agentId ?? "").trim();
+  return trimmed || "main";
+}
+
+function buildScopeKey(agentId: string): string {
+  return normalizeAgentId(agentId);
+}
+
+/**
+ * identityKey covers all dimensions that should trigger manager rebuild when
+ * changed: target Milvus instance + collection + embedding configuration.
+ * Index parameters (efConstruction etc.) are intentionally excluded — they
+ * should be migrated through `openclaw doctor --fix` rather than auto-rebuild.
+ */
+function buildIdentityKey(searchCfg: MilvusSearchConfig, agentId: string): string {
+  return [
+    normalizeAgentId(agentId),
+    searchCfg.host,
+    searchCfg.port,
+    searchCfg.collectionName,
+    searchCfg.embedding.provider,
+    searchCfg.embedding.model,
+    searchCfg.embedding.dimensions ?? "default",
+  ].join("|");
+}
+
+async function buildMilvusManager(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  searchCfg: MilvusSearchConfig;
+}): Promise<MilvusSearchManager> {
+  const { cfg, agentId, searchCfg } = params;
+  let degraded = false;
+
+  const client = createMilvusClient(searchCfg.host, searchCfg.port);
+
+  // Eager init: ensure the collection is ready (degrade on failure, do not throw)
+  try {
+    await ensureCollectionReady(client, {
+      collectionName: searchCfg.collectionName,
+      embeddingDim: searchCfg.embedding.dimensions ?? 1024,
+    });
+  } catch (bootstrapErr) {
+    console.warn(
+      "[memory-milvus] Collection bootstrap failed, operating in degraded mode:",
+      (bootstrapErr as Error).message ?? bootstrapErr,
+    );
+    degraded = true;
+  }
+
+  const provider = await createEmbeddingProvider(
+    cfg,
+    agentId,
+    searchCfg.embedding.provider,
+    searchCfg.embedding.model,
+    searchCfg.embedding.dimensions,
+  );
+
+  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+  return new MilvusSearchManager(
+    client,
+    searchCfg.collectionName,
+    provider,
+    agentId,
+    searchCfg,
+    workspaceDir,
+    { degraded },
+  );
+}
+
+// ── Runtime ────────────────────────────────────────────────────────
 
 const milvusRuntime: MemoryPluginRuntime = {
   async getMemorySearchManager(params) {
     const { cfg, agentId } = params;
 
-    let degraded = false;
+    const rawConfig = readPluginConfig(cfg);
+    if (!rawConfig) {
+      return {
+        manager: null,
+        error:
+          'memory-milvus plugin config not found. Set plugins.entries["memory-milvus"].config in openclaw config.',
+      };
+    }
 
+    let searchCfg: MilvusSearchConfig;
     try {
-      // Read plugin config
-      const rawConfig = readPluginConfig(cfg);
-      if (!rawConfig) {
-        return {
-          manager: null,
-          error:
-            'memory-milvus plugin config not found. Set plugins.entries["memory-milvus"].config in openclaw config.',
-        };
+      searchCfg = parseMilvusConfig(rawConfig);
+    } catch (err) {
+      return {
+        manager: null,
+        error: `Failed to parse memory-milvus plugin config: ${(err as Error).message}`,
+      };
+    }
+
+    const scopeKey = buildScopeKey(agentId);
+    const identityKey = buildIdentityKey(searchCfg, agentId);
+
+    // (1) Cache hit: same scope, same identity → reuse
+    const cached = managerPool.get(scopeKey);
+    if (cached && cached.identityKey === identityKey) {
+      return { manager: cached.manager };
+    }
+
+    // (2) Identity changed (host/collection/embedding swap): evict & close old
+    if (cached && cached.identityKey !== identityKey) {
+      managerPool.delete(scopeKey);
+      await cached.manager.close().catch(() => {});
+    }
+
+    // (3) Pending dedup: another caller is already building for this scope
+    const pending = pendingCreates.get(scopeKey);
+    if (pending) {
+      const entry = await pending.catch(() => null);
+      if (entry && entry.identityKey === identityKey) {
+        return { manager: entry.manager };
       }
+      // Pending finished with a different identity or failed — fall through
+    }
 
-      const searchCfg = parseMilvusConfig(rawConfig);
+    // (4) Build new manager; expose the in-flight promise so concurrent callers wait
+    const createPromise: Promise<ManagerPoolEntry | null> = (async () => {
+      const manager = await buildMilvusManager({ cfg, agentId, searchCfg });
+      const entry: ManagerPoolEntry = { identityKey, manager };
+      managerPool.set(scopeKey, entry);
+      return entry;
+    })();
 
-      // Create Milvus client
-      const client = createMilvusClient(searchCfg.host, searchCfg.port);
-
-      // Eager init: ensure the collection is ready
-      try {
-        await ensureCollectionReady(client, {
-          collectionName: searchCfg.collectionName,
-          embeddingDim: searchCfg.embedding.dimensions ?? 1024,
-        });
-      } catch (bootstrapErr) {
-        // Unreachable / collection create failed → warn + degraded, do not block plugin init
-        console.warn(
-          "[memory-milvus] Collection bootstrap failed, operating in degraded mode:",
-          (bootstrapErr as Error).message ?? bootstrapErr,
-        );
-        degraded = true;
-      }
-
-      // Create embedding provider
-      const provider = await createEmbeddingProvider(
-        cfg,
-        agentId,
-        searchCfg.embedding.provider,
-        searchCfg.embedding.model,
-        searchCfg.embedding.dimensions,
-      );
-
-      // Create search manager
-      const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
-      const manager = new MilvusSearchManager(
-        client,
-        searchCfg.collectionName,
-        provider,
-        agentId,
-        searchCfg,
-        workspaceDir,
-        { degraded },
-      );
-
-      // Hold reference for later close
-      activeManager = manager;
-
-      return { manager };
+    pendingCreates.set(scopeKey, createPromise);
+    try {
+      const entry = await createPromise;
+      return entry
+        ? { manager: entry.manager }
+        : { manager: null, error: "Failed to initialize Milvus search manager: unknown error" };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { manager: null, error: `Failed to initialize Milvus search manager: ${message}` };
+    } finally {
+      pendingCreates.delete(scopeKey);
     }
   },
 
@@ -213,8 +305,10 @@ const milvusRuntime: MemoryPluginRuntime = {
   },
 
   async closeAllMemorySearchManagers() {
-    await activeManager?.close();
-    activeManager = null;
+    // Snapshot then clear so concurrent getMemorySearchManager calls rebuild fresh.
+    const entries = Array.from(managerPool.values());
+    managerPool.clear();
+    await Promise.allSettled(entries.map((entry) => entry.manager.close()));
   },
 };
 
@@ -238,28 +332,47 @@ export default definePluginEntry({
       writeToolNames: ["memory_write"],
     });
 
+    // Per-tool-call manager resolver: pool ensures correct scope (agentId+identity).
+    function makeGetManager(ctx: OpenClawPluginToolContext) {
+      return async (): Promise<MilvusSearchManager | null> => {
+        const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
+        if (!cfg) return null;
+        const agentId = ctx.agentId ?? "main";
+        const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
+        return (result.manager as MilvusSearchManager | null) ?? null;
+      };
+    }
+
     // memory_write tool: called by AI flush turn, delegates to manager.write()
-    api.registerTool(() => createMemoryWriteTool({ getManager: () => activeManager }), {
-      names: ["memory_write"],
-    });
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) =>
+        createMemoryWriteTool({ getManager: makeGetManager(ctx) }),
+      { names: ["memory_write"] },
+    );
 
     // memory_search tool: Milvus ANN + BM25 hybrid search
-    api.registerTool(() => createMemorySearchTool({ getManager: () => activeManager }), {
-      names: ["memory_search"],
-    });
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => {
+        const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
+        return createMemorySearchTool({
+          getManager: makeGetManager(ctx),
+          cfg,
+          agentSessionKey: ctx.sessionKey,
+          sandboxed: ctx.sandboxed,
+        });
+      },
+      { names: ["memory_search"] },
+    );
 
     // memory_get tool: PK lookup → MemoryEntry
-    api.registerTool(() => createMemoryGetTool({ getManager: () => activeManager }), {
-      names: ["memory_get"],
-    });
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => createMemoryGetTool({ getManager: makeGetManager(ctx) }),
+      { names: ["memory_get"] },
+    );
 
-    // Dreaming orchestration — lazy-init factory resolver.
-    // When activeManager is null or degraded, creates one via
-    // milvusRuntime.getMemorySearchManager() on demand. This
-    // avoids cron-isolated sessions failing because activeManager
-    // was not initialized.
+    // Dreaming orchestration — Manager Pool already handles cache / identity
+    // changes / concurrent first-time creates, so the resolver is a thin wrapper.
     setDreamingManagerResolver(async (cfg: OpenClawConfig, agentId: string) => {
-      if (activeManager && !activeManager.degraded) return activeManager;
       const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
       if (!result.manager && result.error) {
         api.logger.warn(`memory-milvus: dreaming manager lazy-init failed: ${result.error}`);

@@ -25,8 +25,7 @@ const MEMORY_WRITE_SCHEMA = {
     label: {
       type: "string" as const,
       enum: Object.values(MEMORY_SOURCE_LABELS) as readonly string[],
-      description:
-        "Source label for the memory. Defaults to chat_extract for AI-flushed memories.",
+      description: "Source label for the memory. Defaults to chat_extract for AI-flushed memories.",
       default: MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
     },
   },
@@ -35,8 +34,19 @@ const MEMORY_WRITE_SCHEMA = {
 
 // ── Factory ────────────────────────────────────────────────────────
 
+type MemoryWriteManager = {
+  write(entry: {
+    text: string;
+    provenance?: { label?: string };
+  }): Promise<{ id: string; provenance?: { label?: string } }>;
+};
+
 export interface MemoryWriteToolDeps {
-  getManager: () => { write(entry: { text: string; provenance?: { label?: string } }): Promise<{ id: string; provenance?: { label?: string } }> } | null;
+  /**
+   * Resolve the active MilvusSearchManager.
+   * May return synchronously (tests) or asynchronously (runtime: lazy pool lookup).
+   */
+  getManager: () => MemoryWriteManager | Promise<MemoryWriteManager | null> | null;
 }
 
 /**
@@ -65,7 +75,7 @@ export function createMemoryWriteTool(deps: MemoryWriteToolDeps): AnyAgentTool {
         return jsonResult({ error: (err as Error).message });
       }
 
-      const manager = deps.getManager();
+      const manager = await Promise.resolve(deps.getManager());
       if (!manager) {
         return jsonResult({
           error:
