@@ -20,9 +20,12 @@
       "optional": true
     }
   },
+  "scripts": {
+    "build": "tsdown"
+  },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
   }
 }

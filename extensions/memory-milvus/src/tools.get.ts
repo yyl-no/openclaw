@@ -70,7 +70,15 @@ export function createMemoryGetTool(deps: MemoryGetToolDeps): AnyAgentTool {
         return jsonResult({ error: "id is required for milvus backend memory retrieval" });
       }
 
-      const manager = await Promise.resolve(deps.getManager());
+      let manager: MemoryGetManager | null;
+      try {
+        manager = await Promise.resolve(deps.getManager());
+      } catch (err) {
+        return jsonResult({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       if (!manager) {
         return jsonResult({
           error:

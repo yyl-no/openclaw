@@ -75,7 +75,15 @@ export function createMemoryWriteTool(deps: MemoryWriteToolDeps): AnyAgentTool {
         return jsonResult({ error: (err as Error).message });
       }
 
-      const manager = await Promise.resolve(deps.getManager());
+      let manager: MemoryWriteManager | null;
+      try {
+        manager = await Promise.resolve(deps.getManager());
+      } catch (err) {
+        return jsonResult({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       if (!manager) {
         return jsonResult({
           error:

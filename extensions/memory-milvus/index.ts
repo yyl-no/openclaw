@@ -354,12 +354,20 @@ export default definePluginEntry({
 
     // Per-tool-call manager resolver: pool ensures correct scope (agentId+identity).
     function makeGetManager(ctx: OpenClawPluginToolContext) {
-      return async (): Promise<MilvusSearchManager | null> => {
+      return async (): Promise<MilvusSearchManager> => {
         const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
-        if (!cfg) return null;
+        if (!cfg) throw new Error("memory-milvus: no runtime config available");
         const agentId = ctx.agentId ?? "main";
         const result = await milvusRuntime.getMemorySearchManager({ cfg, agentId });
-        return (result.manager as MilvusSearchManager | null) ?? null;
+
+        if (!result.manager) {
+          throw new Error(
+            result.error ??
+              "Milvus search manager is not initialized. Check memory-milvus config, Milvus connectivity, collection bootstrap, and embedding provider.",
+          );
+        }
+
+        return result.manager as MilvusSearchManager;
       };
     }
 

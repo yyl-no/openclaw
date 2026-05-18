@@ -87,6 +87,21 @@
           },
           "collectionName": {
             "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "ssl": {
+            "type": "boolean"
+          },
+          "database": {
+            "type": "string"
           }
         }
       },
@@ -104,6 +119,45 @@
             "type": "number",
             "minimum": 128,
             "maximum": 8192
+          }
+        }
+      },
+      "search": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "vectorWeight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "textWeight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "useBM25": {
+            "type": "boolean"
+          }
+        }
+      },
+      "index": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "metricType": {
+            "type": "string",
+            "enum": ["COSINE", "IP", "L2"]
+          },
+          "hnswM": {
+            "type": "number",
+            "minimum": 4,
+            "maximum": 128
+          },
+          "efConstruction": {
+            "type": "number",
+            "minimum": 8,
+            "maximum": 1024
           }
         }
       },

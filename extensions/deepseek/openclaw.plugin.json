@@ -96,7 +96,8 @@
             "compat": {
               "supportsUsageInStreaming": true,
               "supportsReasoningEffort": false,
-              "maxTokensField": "max_tokens"
+              "maxTokensField": "max_tokens",
+              "supportsTools": false
             }
           }
         ]

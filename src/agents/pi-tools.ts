@@ -876,11 +876,17 @@ export function createOpenClawCodingTools(options?: {
   ];
   options?.recordToolPrepStage?.("openclaw-tools");
   const toolsForMemoryFlush: AnyAgentTool[] = isMemoryFlushRun ? [] : tools;
+
   if (isMemoryFlushRun) {
+    const allowedMemoryFlushToolNames = isMilvusBackend
+      ? new Set(["memory_write"])
+      : resolveMemoryWriteToolNames();
+
     for (const tool of tools) {
-      if (!resolveMemoryWriteToolNames().has(tool.name)) {
+      if (!allowedMemoryFlushToolNames.has(tool.name)) {
         continue;
       }
+
       if (tool.name === "write") {
         // Milvus backend: exclude the general write tool so the model must use memory_write.
         if (isMilvusBackend) {
@@ -902,7 +908,17 @@ export function createOpenClawCodingTools(options?: {
           continue;
         }
       }
+
       toolsForMemoryFlush.push(tool);
+    }
+
+    if (
+      isMilvusBackend &&
+      !toolsForMemoryFlush.some((tool) => tool.name === "memory_write")
+    ) {
+      throw new Error(
+        "memory_write tool required for Milvus memory flush but was not available",
+      );
     }
   }
   const toolsForMessageProvider = filterToolsByMessageProvider(

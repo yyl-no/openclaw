@@ -1,9 +1,9 @@
 /** Milvus collection lifecycle — eager init with idempotent create/index/load steps. */
 
-import {
+import type {
   MilvusClient,
-  type ResStatus,
-  type DescribeCollectionResponse,
+  ResStatus,
+  DescribeCollectionResponse,
 } from "@zilliz/milvus2-sdk-node";
 import type { FieldType } from "@zilliz/milvus2-sdk-node/dist/milvus/types/Collection.js";
 import {

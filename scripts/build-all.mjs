@@ -12,6 +12,11 @@ const WINDOWS_BUILD_MAX_OLD_SPACE_MB = 4096;
 const BUILD_CACHE_VERSION = 2;
 export const BUILD_ALL_STEPS = [
   { label: "plugins:assets:build", kind: "pnpm", pnpmArgs: ["plugins:assets:build"] },
+  {
+    label: "build:memory-milvus",
+    kind: "pnpm",
+    pnpmArgs: ["--filter", "@openclaw/memory-milvus", "build"],
+  },
   { label: "tsdown", kind: "node", args: ["scripts/tsdown-build.mjs"] },
   {
     label: "check-cli-bootstrap-imports",

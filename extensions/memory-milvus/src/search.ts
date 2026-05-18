@@ -7,13 +7,19 @@
  * - BM25 native hybrid search available when Milvus ≥ 2.4 has a BM25 Function
  */
 
-import {
+import { createRequire } from "node:module";
+import type {
   MilvusClient,
-  type NumberArrayId,
-  type QueryReq,
-  type RowData,
-  type SearchSimpleReq,
+  NumberArrayId,
+  QueryReq,
+  RowData,
+  SearchSimpleReq,
 } from "@zilliz/milvus2-sdk-node";
+
+const requireSdk = createRequire(import.meta.url);
+const { MilvusClient: SdkMilvusClient } = requireSdk("@zilliz/milvus2-sdk-node") as {
+  MilvusClient: typeof MilvusClient;
+};
 import type { MemoryEmbeddingProvider } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 import type {
   MemoryEmbeddingProbeResult,
@@ -1502,7 +1508,7 @@ export class MilvusSearchManager {
 /** Create a MilvusClient instance with optional auth / SSL / database. */
 export function createMilvusClient(cfg: MilvusSearchConfig): MilvusClient {
   const address = cfg.host.includes(":") ? cfg.host : `${cfg.host}:${cfg.port}`;
-  return new MilvusClient({
+  return new SdkMilvusClient({
     address,
     token: cfg.token,
     username: cfg.username,
