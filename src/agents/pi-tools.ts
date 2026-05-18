@@ -741,10 +741,11 @@ export function createOpenClawCodingTools(options?: {
     sandboxToolPolicy,
     subagentPolicy,
   ]);
-  const pluginToolsOnly =
-    includeOpenClawTools || !includePluginTools
-      ? []
-      : resolveOpenClawPluginToolsForOptions({
+  const shouldResolvePluginToolsDirectly =
+    includePluginTools && (!includeOpenClawTools || (isMemoryFlushRun && isMilvusBackend));
+
+  const pluginToolsOnly = shouldResolvePluginToolsDirectly
+    ? resolveOpenClawPluginToolsForOptions({
           options: {
             agentSessionKey: options?.sessionKey,
             agentChannel: resolveGatewayMessageChannel(options?.messageProvider),
@@ -775,7 +776,8 @@ export function createOpenClawCodingTools(options?: {
             allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
           },
           resolvedConfig: options?.config,
-        });
+        })
+      : [];
   const toolSearchTools = toolSearchControlsEnabled
     ? createToolSearchTools({
         config: options?.config,
@@ -789,7 +791,17 @@ export function createOpenClawCodingTools(options?: {
         executeTool: options?.toolSearchCatalogExecutor,
       })
     : [];
-  const tools: AnyAgentTool[] = [
+  function dedupeToolsByName(tools: AnyAgentTool[]): AnyAgentTool[] {
+    const seen = new Set<string>();
+    const out: AnyAgentTool[] = [];
+    for (const tool of tools) {
+      if (seen.has(tool.name)) continue;
+      seen.add(tool.name);
+      out.push(tool);
+    }
+    return out;
+  }
+  const tools: AnyAgentTool[] = dedupeToolsByName([
     ...base,
     ...(includeBaseCodingTools && sandboxRoot
       ? allowWorkspaceWrites
@@ -871,11 +883,27 @@ export function createOpenClawCodingTools(options?: {
           allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
           recordToolPrepStage: options?.recordToolPrepStage,
         })
-      : pluginToolsOnly),
+      : []),
+    ...pluginToolsOnly,
     ...toolSearchTools,
-  ];
+  ]);
   options?.recordToolPrepStage?.("openclaw-tools");
   const toolsForMemoryFlush: AnyAgentTool[] = isMemoryFlushRun ? [] : tools;
+
+  if (isMemoryFlushRun) {
+    console.warn(
+      "[memory-flush] backend=",
+      options?.memoryFlushBackendKind,
+      "includeOpenClawTools=",
+      includeOpenClawTools,
+      "includePluginTools=",
+      includePluginTools,
+      "pluginToolsOnly=",
+      pluginToolsOnly.map((tool) => tool.name).join(", "),
+      "tools=",
+      tools.map((tool) => tool.name).join(", "),
+    );
+  }
 
   if (isMemoryFlushRun) {
     const allowedMemoryFlushToolNames = isMilvusBackend
