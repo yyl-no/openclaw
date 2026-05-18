@@ -718,7 +718,7 @@ export function createOpenClawCodingTools(options?: {
           workspaceOnly: applyPatchWorkspaceOnly,
         });
   options?.recordToolPrepStage?.("shell-tools");
-  const pluginToolAllowlist = collectExplicitAllowlist([
+  const pluginToolAllowlistBase = collectExplicitAllowlist([
     profilePolicy,
     providerProfilePolicy,
     globalPolicy,
@@ -730,6 +730,11 @@ export function createOpenClawCodingTools(options?: {
     subagentPolicy,
     options?.runtimeToolAllowlist ? { allow: options.runtimeToolAllowlist } : undefined,
   ]);
+
+  const pluginToolAllowlist =
+    isMemoryFlushRun && isMilvusBackend
+      ? Array.from(new Set([...pluginToolAllowlistBase, "memory_write"]))
+      : pluginToolAllowlistBase;
   const pluginToolDenylist = collectExplicitDenylist([
     profilePolicy,
     providerProfilePolicy,
