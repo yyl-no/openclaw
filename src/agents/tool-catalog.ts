@@ -134,6 +134,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+  id: "memory_write",
+  label: "memory_write",
+  description: "Write memory entries to the configured memory backend",
+  sectionId: "memory",
+  profiles: ["coding"],
+  includeInOpenClawGroup: true,
+  },
+  {
     id: "memory_get",
     label: "memory_get",
     description: "Read memory files",

@@ -645,7 +645,7 @@ export function createSandboxedEditTool(params: SandboxToolParams) {
   return wrapToolParamValidation(withRecovery, REQUIRED_PARAM_GROUPS.edit);
 }
 
-export function createHostWorkspaceWriteTool(root: string, options?: { workspaceOnly?: boolean }) {
+export function createHostWorkspaceWriteTool(root: string, options?: { workspaceOnly?: boolean;blockMemoryMarkdownWrites?: boolean;},) {
   const base = createWriteTool(root, {
     operations: createHostWriteOperations(root, options),
   }) as unknown as AnyAgentTool;
@@ -746,17 +746,46 @@ async function writeHostFile(absolutePath: string, content: string) {
   await fs.writeFile(resolved, content, "utf-8");
 }
 
-function createHostWriteOperations(root: string, options?: { workspaceOnly?: boolean }) {
+function isBlockedMemoryMarkdownWrite(root: string, filePath: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  const resolvedPath = path.resolve(expandTildeToOsHome(filePath));
+  const relative = path.relative(resolvedRoot, resolvedPath).replace(/\\/g, "/");
+
+  if (relative.startsWith("../") || path.isAbsolute(relative)) {
+    return false;
+  }
+
+  return /^memory\/[^/]+\.md$/i.test(relative);
+}
+
+function createMemoryMarkdownWriteBlockedError(): Error {
+  return new Error(
+    "Direct writes to memory/*.md are disabled because the active memory backend is memory-milvus. Use memory_write so the memory is stored in Milvus instead.",
+  );
+}
+
+function createHostWriteOperations(root: string, options?: { workspaceOnly?: boolean;blockMemoryMarkdownWrites?: boolean;},) {
   const workspaceOnly = options?.workspaceOnly ?? false;
 
   if (!workspaceOnly) {
     // When workspaceOnly is false, allow writes anywhere on the host
     return {
       mkdir: async (dir: string) => {
+        if (options?.blockMemoryMarkdownWrites && isBlockedMemoryMarkdownWrite(root, dir)) {
+          throw createMemoryMarkdownWriteBlockedError();
+        }
         const resolved = path.resolve(expandTildeToOsHome(dir));
         await fs.mkdir(resolved, { recursive: true });
       },
-      writeFile: writeHostFile,
+      writeFile: async (absolutePath: string, content: string) => {
+        if (
+          options?.blockMemoryMarkdownWrites &&
+          isBlockedMemoryMarkdownWrite(root, absolutePath)
+        ) {
+          throw createMemoryMarkdownWriteBlockedError();
+        }
+        await writeHostFile(absolutePath, content);
+      },
     } as const;
   }
 
@@ -771,6 +800,14 @@ function createHostWriteOperations(root: string, options?: { workspaceOnly?: boo
     },
     writeFile: async (absolutePath: string, content: string) => {
       const relative = toRelativeWorkspacePath(root, absolutePath);
+
+      if (
+        options?.blockMemoryMarkdownWrites &&
+        /^memory\/[^/]+\.md$/i.test(relative.replace(/\\/g, "/"))
+      ) {
+        throw createMemoryMarkdownWriteBlockedError();
+      }
+
       await (await rootPromise).write(relative, content, { mkdir: true });
     },
   } as const;

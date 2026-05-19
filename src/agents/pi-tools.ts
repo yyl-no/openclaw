@@ -588,6 +588,8 @@ export function createOpenClawCodingTools(options?: {
   const includeChannelTools = toolConstructionPlan.includeChannelTools;
   const includePluginTools = toolConstructionPlan.includePluginTools;
   const workspaceOnly = fsPolicy.workspaceOnly;
+  const blockMemoryMarkdownWrites =
+    isMilvusBackend && !isMemoryFlushRun;
   const applyPatchConfig = execConfig.applyPatch;
   // Secure by default: apply_patch is workspace-contained unless explicitly disabled.
   // (tools.fs.workspaceOnly is a separate umbrella flag for read/write/edit/apply_patch.)
@@ -642,7 +644,10 @@ export function createOpenClawCodingTools(options?: {
         if (sandboxRoot) {
           continue;
         }
-        const wrapped = createHostWorkspaceWriteTool(workspaceRoot, { workspaceOnly });
+        const wrapped = createHostWorkspaceWriteTool(workspaceRoot, {
+          workspaceOnly,
+          blockMemoryMarkdownWrites,
+        });
         base.push(workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped);
         continue;
       }
