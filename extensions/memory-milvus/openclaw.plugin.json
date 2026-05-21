@@ -44,6 +44,41 @@
       "help": "Vector dimensions for the embedding model",
       "advanced": true
     },
+    "search.useBM25": {
+      "label": "Use BM25",
+      "help": "Enable Milvus BM25 sparse hybrid search on compatible deployments",
+      "advanced": true
+    },
+    "search.vectorWeight": {
+      "label": "Vector Weight",
+      "placeholder": "0.7",
+      "help": "Weight for dense vector similarity during result fusion",
+      "advanced": true
+    },
+    "search.textWeight": {
+      "label": "Text Weight",
+      "placeholder": "0.3",
+      "help": "Weight for text relevance during result fusion",
+      "advanced": true
+    },
+    "index.metricType": {
+      "label": "Vector Metric",
+      "placeholder": "COSINE",
+      "help": "Metric type for the dense vector index",
+      "advanced": true
+    },
+    "index.hnswM": {
+      "label": "HNSW M",
+      "placeholder": "16",
+      "help": "HNSW M parameter for the dense vector index",
+      "advanced": true
+    },
+    "index.efConstruction": {
+      "label": "HNSW efConstruction",
+      "placeholder": "200",
+      "help": "HNSW efConstruction parameter for index build quality",
+      "advanced": true
+    },
     "dreaming.enabled": {
       "label": "Dreaming Enabled",
       "help": "Enable scheduled short-term-to-long-term memory promotion via Milvus dreaming"

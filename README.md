@@ -33,6 +33,15 @@ Preferred setup: run `openclaw onboard` in your terminal.
 OpenClaw Onboard guides you step by step through setting up the gateway, workspace, channels, and skills. It is the recommended CLI setup path and works on **macOS, Linux, and Windows (via WSL2; strongly recommended)**.
 Works with npm, pnpm, or bun.
 
+## Milvus memory backend
+
+This fork includes `memory-milvus`, an OpenClaw memory backend that stores
+memory entries in Milvus and exposes `memory_write`, `memory_search`,
+`memory_get`, and Milvus dreaming support.
+
+Start with the plugin guide:
+[extensions/memory-milvus/README.md](extensions/memory-milvus/README.md)
+
 ## Sponsors
 
 <table>

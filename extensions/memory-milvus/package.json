@@ -2,7 +2,7 @@
   "name": "@openclaw/memory-milvus",
   "version": "2026.5.10-beta.1",
   "private": true,
-  "description": "OpenClaw Milvus-backed memory plugin with vector search",
+  "description": "OpenClaw Milvus-backed memory plugin with vector search and dreaming",
   "type": "module",
   "dependencies": {
     "@zilliz/milvus2-sdk-node": "~2.4.11",
