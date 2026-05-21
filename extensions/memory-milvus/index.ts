@@ -215,10 +215,18 @@ async function buildMilvusManager(params: {
   try {
     await ensureCollectionReady(client, {
       collectionName: searchCfg.collectionName,
+      host: searchCfg.host,
+      port: searchCfg.port,
+      ssl: searchCfg.ssl,
+      token: searchCfg.token,
+      username: searchCfg.username,
+      password: searchCfg.password,
+      database: searchCfg.database,
       embeddingDim: searchCfg.embedding.dimensions ?? 1024,
       metricType: searchCfg.index?.metricType,
       hnswM: searchCfg.index?.hnswM,
       efConstruction: searchCfg.index?.efConstruction,
+      enableSparseIndex: searchCfg.search?.useBM25 === true,
     });
   } catch (bootstrapErr) {
     console.warn(

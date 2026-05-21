@@ -10,7 +10,6 @@
 import { createRequire } from "node:module";
 import type {
   MilvusClient,
-  NumberArrayId,
   QueryReq,
   RowData,
   SearchSimpleReq,
@@ -191,6 +190,87 @@ function combineFilters(a: string, b?: string): string {
   const bNorm = b?.trim() ?? "";
   if (aNorm && bNorm) return `(${aNorm}) && (${bNorm})`;
   return aNorm || bNorm;
+}
+
+type MilvusStatusResult = {
+  status?: {
+    error_code?: string | number;
+    reason?: string;
+  };
+};
+
+type MilvusInsertResult = MilvusStatusResult & {
+  IDs?: unknown;
+  ids?: unknown;
+  primary_keys?: unknown;
+  succ_index?: unknown;
+  insert_cnt?: unknown;
+  insertCount?: unknown;
+};
+
+type MilvusRestInsertResponse = {
+  code?: number;
+  message?: string;
+  data?: {
+    insertCount?: number;
+    insertIds?: Array<string | number>;
+  };
+};
+
+type MilvusFlushClient = {
+  flushSync?: (data: { collection_names: string[] }) => Promise<MilvusStatusResult>;
+  flush?: (data: { collection_names: string[] }) => Promise<MilvusStatusResult>;
+};
+
+function assertMilvusStatusOk(result: MilvusStatusResult, operation: string): void {
+  const errorCode = result.status?.error_code;
+  if (
+    errorCode == null ||
+    errorCode === 0 ||
+    errorCode === "0" ||
+    errorCode === "Success" ||
+    errorCode === "SUCCESS"
+  ) {
+    return;
+  }
+  const reason = result.status?.reason ? `: ${result.status.reason}` : "";
+  throw new Error(`${operation} failed (${String(errorCode)})${reason}`);
+}
+
+function readFirstIntId(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as {
+    int_id?: { data?: unknown[] };
+    intId?: { data?: unknown[] };
+    id_array?: { int_id?: { data?: unknown[] }; intId?: { data?: unknown[] } };
+  };
+  return (
+    candidate.int_id?.data?.[0] ??
+    candidate.intId?.data?.[0] ??
+    candidate.id_array?.int_id?.data?.[0] ??
+    candidate.id_array?.intId?.data?.[0]
+  );
+}
+
+function extractInsertPrimaryKey(result: MilvusInsertResult): string | null {
+  const pk = readFirstIntId(result.IDs) ?? readFirstIntId(result.ids) ?? readFirstIntId(result.primary_keys);
+  if (pk == null) return null;
+  return String(pk);
+}
+
+function milvusRestEndpoint(cfg: MilvusSearchConfig, action: "insert"): string {
+  const host = cfg.host || "localhost";
+  const hasScheme = /^https?:\/\//i.test(host);
+  const base = hasScheme
+    ? host
+    : `${cfg.ssl ? "https" : "http"}://${host.includes(":") ? host : `${host}:${cfg.port || 19530}`}`;
+  return `${base.replace(/\/+$/, "")}/v2/vectordb/entities/${action}`;
+}
+
+function milvusAuthToken(cfg: MilvusSearchConfig): string | undefined {
+  if (cfg.token) return cfg.token;
+  if (cfg.username && cfg.password) return `${cfg.username}:${cfg.password}`;
+  return undefined;
 }
 
 // ── TF-IDF ────────────────────────────────────────────────────────
@@ -611,16 +691,6 @@ export class MilvusSearchManager {
     scalarFilter: string,
   ): Promise<MemoryReference[] | null> {
     try {
-      // Build a sparse vector dict from query keywords for BM25. When the
-      // server-side BM25 Function exists, Milvus applies the same tokenization
-      // and weighting to the query.  Passing a dict with term→1.0 weight lets
-      // the Function produce the final BM25-weighted sparse vector.
-      const keywords = extractKeywords(queryText);
-      const sparseVec: Record<string, number> = {};
-      for (const kw of keywords) {
-        sparseVec[kw] = 1.0;
-      }
-
       const vw = this.cfg.search?.vectorWeight ?? DEFAULT_VECTOR_WEIGHT;
       const tw = this.cfg.search?.textWeight ?? DEFAULT_TEXT_WEIGHT;
 
@@ -640,7 +710,7 @@ export class MilvusSearchManager {
           },
           {
             anns_field: FIELD_SPARSE_BM25,
-            data: sparseVec,
+            data: queryText,
             expr: scalarFilter || undefined,
           },
         ],
@@ -1008,7 +1078,12 @@ export class MilvusSearchManager {
     };
 
     // Degraded or health check failed → fallback
-    if (this.degraded || !(await this.healthCheck())) {
+    if (this.degraded) {
+      console.warn("[memory-milvus] write skipped: manager is in degraded mode");
+      return this.fallbackWrite(fullEntry);
+    }
+    if (!(await this.healthCheck())) {
+      console.warn("[memory-milvus] write skipped: collection health check failed");
       return this.fallbackWrite(fullEntry);
     }
 
@@ -1059,14 +1134,41 @@ export class MilvusSearchManager {
     data[FIELD_EMBEDDING] = vector;
     data[FIELD_CONTENT_HASH] = contentHash;
 
+    const useBM25 = this.cfg.search?.useBM25 ?? false;
+    if (useBM25) {
+      return this.insertEntryViaRest(entry, data, contentHash);
+    }
+
     const result = await this.client.insert({
       collection_name: this.collectionName,
       data: [data as unknown as RowData],
-    });
+    }) as MilvusInsertResult;
+
+    assertMilvusStatusOk(result, "insert");
+    await this.flushCollectionAfterInsert();
 
     // Extract Milvus auto-increment PK
-    const pk = (result.IDs as NumberArrayId)?.int_id?.data?.[0];
-    const idStr = pk != null ? String(pk) : `milvus:${Date.now()}`;
+    const idStr = extractInsertPrimaryKey(result);
+    if (!idStr) {
+      const insertedRef = await this.findByContentHash(contentHash);
+      if (insertedRef) {
+        console.warn(
+          "[memory-milvus] insert succeeded",
+          `collection=${this.collectionName}`,
+          `id=${insertedRef.id}`,
+          "pk=queried",
+        );
+        return insertedRef;
+      }
+      throw new Error("insert succeeded but Milvus did not return or expose the inserted primary key");
+    }
+
+    console.warn(
+      "[memory-milvus] insert succeeded",
+      `collection=${this.collectionName}`,
+      `id=${idStr}`,
+      "pk=returned",
+    );
 
     return {
       id: idStr,
@@ -1077,6 +1179,112 @@ export class MilvusSearchManager {
         label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
       },
     };
+  }
+
+  private async insertEntryViaRest(
+    entry: Omit<MemoryEntry, "id">,
+    data: Record<string, unknown>,
+    contentHash: string,
+  ): Promise<MemoryReference> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Request-Timeout": "30",
+    };
+    const authToken = milvusAuthToken(this.cfg);
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
+
+    const response = await fetch(milvusRestEndpoint(this.cfg, "insert"), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...(this.cfg.database ? { dbName: this.cfg.database } : {}),
+        collectionName: this.collectionName,
+        data: [data],
+      }),
+    });
+    const bodyText = await response.text();
+    let body: MilvusRestInsertResponse | null = null;
+    if (bodyText) {
+      try {
+        body = JSON.parse(bodyText) as MilvusRestInsertResponse;
+      } catch {
+        body = null;
+      }
+    }
+
+    const code = typeof body?.code === "number" ? body.code : response.ok ? 0 : response.status;
+    if (!response.ok || (code !== 0 && code !== 200)) {
+      const message =
+        typeof body?.message === "string" && body.message
+          ? body.message
+          : bodyText || response.statusText || `HTTP ${response.status}`;
+      throw new Error(`insert failed (${code}): ${message}`);
+    }
+
+    await this.flushCollectionAfterInsert();
+
+    const returnedId = body?.data?.insertIds?.[0];
+    const idStr = returnedId == null ? null : String(returnedId);
+    if (!idStr) {
+      const insertedRef = await this.findByContentHash(contentHash);
+      if (insertedRef) {
+        console.warn(
+          "[memory-milvus] insert succeeded",
+          `collection=${this.collectionName}`,
+          `id=${insertedRef.id}`,
+          "pk=queried",
+        );
+        return insertedRef;
+      }
+      throw new Error("insert succeeded but Milvus REST did not return or expose the inserted primary key");
+    }
+
+    console.warn(
+      "[memory-milvus] insert succeeded",
+      `collection=${this.collectionName}`,
+      `id=${idStr}`,
+      "pk=returned",
+    );
+
+    return {
+      id: idStr,
+      snippet: entry.snippet ?? entry.text.slice(0, 200),
+      score: 0,
+      provenance: {
+        kind: entry.provenance?.kind ?? "milvus",
+        label: (entry.provenance?.label as string) ?? MEMORY_SOURCE_LABELS.CHAT_EXTRACT,
+      },
+    };
+  }
+
+  private async flushCollectionAfterInsert(): Promise<void> {
+    const flushClient = this.client as unknown as MilvusFlushClient;
+    try {
+      if (typeof flushClient.flushSync === "function") {
+        assertMilvusStatusOk(
+          await flushClient.flushSync.call(this.client, {
+            collection_names: [this.collectionName],
+          }),
+          "flush",
+        );
+        return;
+      }
+      if (typeof flushClient.flush === "function") {
+        assertMilvusStatusOk(
+          await flushClient.flush.call(this.client, {
+            collection_names: [this.collectionName],
+          }),
+          "flush",
+        );
+      }
+    } catch (err) {
+      warnOnce(
+        "flush-after-insert",
+        `insert succeeded but flush failed: ${(err as Error).message ?? err}`,
+      );
+    }
   }
 
   /**
@@ -1106,10 +1314,11 @@ export class MilvusSearchManager {
   /** Lightweight Milvus health probe (describe_collection). */
   private async healthCheck(): Promise<boolean> {
     try {
-      await this.client.describeCollection({
+      const res = await this.client.hasCollection({
         collection_name: this.collectionName,
       });
-      return true;
+      const ok = res.status?.error_code === "Success" || res.status?.error_code === "0";
+      return ok && Boolean(res.value);
     } catch {
       return false;
     }

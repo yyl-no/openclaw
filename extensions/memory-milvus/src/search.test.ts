@@ -4,7 +4,7 @@ import type {
   MemoryEntry,
   MemoryReference,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MilvusSearchManager, type MilvusSearchConfig } from "./search.js";
 
 // ── Mocks ─────────────────────────────────────────────────────────
@@ -62,17 +62,32 @@ function makeProvider(): MemoryEmbeddingProvider {
 function makeClient(
   overrides?: Partial<
     Record<
-      "describeCollection" | "insert" | "query" | "upsert" | "get" | "search",
+      | "hasCollection"
+      | "describeCollection"
+      | "insert"
+      | "flush"
+      | "flushSync"
+      | "query"
+      | "upsert"
+      | "get"
+      | "search"
+      | "hybridSearch",
       ReturnType<typeof vi.fn>
     >
   >,
 ): MilvusClient {
   return {
-    describeCollection: vi.fn().mockResolvedValue({}),
+    hasCollection: vi.fn().mockResolvedValue({
+      status: { error_code: "Success" },
+      value: true,
+    }),
+    describeCollection: vi.fn().mockResolvedValue({ status: { error_code: "Success" } }),
     insert: vi.fn().mockResolvedValue({ IDs: { int_id: { data: [42] } } }),
+    flushSync: vi.fn().mockResolvedValue({ status: { error_code: "Success" } }),
     query: vi.fn().mockResolvedValue({ data: [] }),
     upsert: vi.fn().mockResolvedValue({}),
     search: vi.fn().mockResolvedValue({ results: [] }),
+    hybridSearch: vi.fn().mockResolvedValue({ results: [] }),
     ...overrides,
   } as unknown as MilvusClient;
 }
@@ -80,6 +95,7 @@ function makeClient(
 function createManager(opts?: {
   client?: MilvusClient;
   provider?: MemoryEmbeddingProvider;
+  config?: MilvusSearchConfig;
   agentId?: string;
   degraded?: boolean;
 }): MilvusSearchManager {
@@ -90,7 +106,7 @@ function createManager(opts?: {
     "test_collection",
     provider,
     opts?.agentId ?? "agent-1",
-    makeConfig(),
+    opts?.config ?? makeConfig(),
     "/tmp/test-workspace",
     { degraded: opts?.degraded ?? false },
   );
@@ -100,6 +116,10 @@ function createManager(opts?: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 // ── Path 1: Successful write ─────────────────────────────────────
@@ -127,17 +147,131 @@ describe("MilvusSearchManager.write: success path", () => {
     const ref = await manager.write(entry);
 
     // health check called
-    expect(client.describeCollection).toHaveBeenCalledOnce();
+    expect(client.hasCollection).toHaveBeenCalledOnce();
     // fallback replayed
     expect(replayFallbackMock).toHaveBeenCalledOnce();
     // embed called
     expect(provider.embedQuery).toHaveBeenCalledWith("Test memory");
     // insert called
     expect(client.insert).toHaveBeenCalledOnce();
+    // visible to Milvus UI / later reads
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).toHaveBeenCalledWith({
+      collection_names: ["test_collection"],
+    });
     // correct id returned
     expect(ref.id).toBe("42");
     expect(ref.provenance.kind).toBe("milvus");
     expect(ref.provenance.label).toBe("chat_extract");
+  });
+});
+
+describe("MilvusSearchManager.write: post-insert visibility", () => {
+  it("BM25 mode inserts through REST so Milvus can populate the sparse Function field", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: 200, data: { insertCount: 1, insertIds: [44] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = makeClient();
+    const manager = createManager({
+      client,
+      config: makeConfig({
+        token: "test-token",
+        database: "default",
+        search: { useBM25: true },
+      }),
+    });
+
+    const ref = await manager.write(makeEntry({ text: "BM25 Function insert" }));
+
+    expect(client.insert).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://localhost:19530/v2/vectordb/entities/insert");
+    expect(init.headers.Authorization).toBe("Bearer test-token");
+    const payload = JSON.parse(String(init.body));
+    expect(payload.dbName).toBe("default");
+    expect(payload.collectionName).toBe("test_collection");
+    expect(payload.data).toHaveLength(1);
+    expect(payload.data[0]).not.toHaveProperty("sparse_bm25");
+    expect(payload.data[0].text).toBe("BM25 Function insert");
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).toHaveBeenCalledOnce();
+    expect(ref.id).toBe("44");
+  });
+
+  it("insert succeeds without returned pk -> flushes and queries by content hash for the real id", async () => {
+    const client = makeClient({
+      insert: vi.fn().mockResolvedValue({ status: { error_code: "Success" } }),
+      query: vi.fn()
+        .mockResolvedValueOnce({ data: [] })
+        .mockResolvedValueOnce({
+          data: [
+            {
+              id: 43,
+              snippet: "No returned primary key",
+              provenance_kind: "milvus",
+              provenance_label: "chat_extract",
+            },
+          ],
+        }),
+    });
+    const manager = createManager({ client });
+
+    const ref = await manager.write(makeEntry({ text: "No returned primary key" }));
+
+    expect(client.insert).toHaveBeenCalledOnce();
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).toHaveBeenCalledOnce();
+    expect(writeFallbackMock).not.toHaveBeenCalled();
+    expect(ref.id).toBe("43");
+  });
+
+  it("insert without returned pk or visible row uses fallback instead of reporting a false milvus id", async () => {
+    const client = makeClient({
+      insert: vi.fn().mockResolvedValue({ status: { error_code: "Success" } }),
+      query: vi.fn().mockResolvedValue({ data: [] }),
+    });
+    const manager = createManager({ client });
+
+    const ref = await manager.write(makeEntry({ text: "Invisible insert" }));
+
+    expect(client.insert).toHaveBeenCalledOnce();
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).toHaveBeenCalledOnce();
+    expect(writeFallbackMock).toHaveBeenCalledOnce();
+    expect(ref.id).toMatch(/^fallback:\d+$/);
+  });
+
+  it("insert status failure uses fallback instead of reporting a false milvus id", async () => {
+    const client = makeClient({
+      insert: vi.fn().mockResolvedValue({
+        status: { error_code: "UnexpectedError", reason: "insert failed" },
+      }),
+    });
+    const manager = createManager({ client });
+
+    const ref = await manager.write(makeEntry({ text: "Rejected insert" }));
+
+    expect(client.insert).toHaveBeenCalledOnce();
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).not.toHaveBeenCalled();
+    expect(writeFallbackMock).toHaveBeenCalledOnce();
+    expect(ref.id).toMatch(/^fallback:\d+$/);
+  });
+
+  it("flush failure does not discard a successful insert", async () => {
+    const client = makeClient({
+      flushSync: vi.fn().mockResolvedValue({
+        status: { error_code: "UnexpectedError", reason: "flush pending" },
+      }),
+    });
+    const manager = createManager({ client });
+
+    const ref = await manager.write(makeEntry({ text: "Flush warning" }));
+
+    expect(client.insert).toHaveBeenCalledOnce();
+    expect((client as unknown as { flushSync: ReturnType<typeof vi.fn> }).flushSync).toHaveBeenCalledOnce();
+    expect(writeFallbackMock).not.toHaveBeenCalled();
+    expect(ref.id).toBe("42");
   });
 });
 
@@ -166,7 +300,7 @@ describe("MilvusSearchManager.write: embed failure", () => {
     const ref = await manager.write(entry);
 
     // health check passed
-    expect(client.describeCollection).toHaveBeenCalledOnce();
+    expect(client.hasCollection).toHaveBeenCalledOnce();
     // embed called
     expect(provider.embedQuery).toHaveBeenCalledWith("Memory that fails");
     // insert not called (embed already failed)
@@ -203,7 +337,7 @@ describe("MilvusSearchManager.write: insert failure", () => {
     const entry = makeEntry({ text: "Memory insert fails" });
     const ref = await manager.write(entry);
 
-    expect(client.describeCollection).toHaveBeenCalledOnce();
+    expect(client.hasCollection).toHaveBeenCalledOnce();
     expect(provider.embedQuery).toHaveBeenCalledOnce();
     expect(client.insert).toHaveBeenCalledOnce();
     // fallback safety net
@@ -233,7 +367,7 @@ describe("MilvusSearchManager.write: degraded direct fallback", () => {
     const ref = await manager.write(entry);
 
     // no health check
-    expect(client.describeCollection).not.toHaveBeenCalled();
+    expect(client.hasCollection).not.toHaveBeenCalled();
     // no embed
     expect(provider.embedQuery).not.toHaveBeenCalled();
     // no insert
@@ -249,7 +383,7 @@ describe("MilvusSearchManager.write: degraded direct fallback", () => {
 describe("MilvusSearchManager.write: health check failure", () => {
   it("not degraded but healthCheck fails → fallback", async () => {
     const client = makeClient({
-      describeCollection: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")),
+      hasCollection: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")),
     });
     const provider = makeProvider();
 
@@ -266,7 +400,7 @@ describe("MilvusSearchManager.write: health check failure", () => {
     const ref = await manager.write(entry);
 
     // health check was called
-    expect(client.describeCollection).toHaveBeenCalledOnce();
+    expect(client.hasCollection).toHaveBeenCalledOnce();
     // but no embed
     expect(provider.embedQuery).not.toHaveBeenCalled();
     // fallback write
@@ -620,6 +754,36 @@ describe("MilvusSearchManager.search: scalar filters", () => {
     expect(searchSpy.mock.calls[0]?.[0]?.filter).toBe(
       'agent_id == "agent-1" && memory_type == "short_term"',
     );
+  });
+
+  it("BM25 hybrid search sends text query to the sparse Function field", async () => {
+    const provider = makeProvider();
+    const hybridSearchSpy = vi.fn().mockResolvedValue({ results: [] });
+    const searchSpy = vi.fn().mockResolvedValue({ results: [] });
+    const querySpy = vi.fn().mockResolvedValue({ data: [] });
+    const client = makeClient({
+      hybridSearch: hybridSearchSpy,
+      search: searchSpy,
+      query: querySpy,
+    });
+    const manager = createManager({
+      client,
+      provider,
+      config: makeConfig({
+        search: { useBM25: true, vectorWeight: 0.7, textWeight: 0.3 },
+      }),
+    });
+
+    await manager.search("exact memory term", { memoryType: "short_term" });
+
+    expect(hybridSearchSpy).toHaveBeenCalledOnce();
+    expect(searchSpy).not.toHaveBeenCalled();
+    const callArg = hybridSearchSpy.mock.calls[0]?.[0];
+    expect(callArg.data[1]).toEqual({
+      anns_field: "sparse_bm25",
+      data: "exact memory term",
+      expr: 'agent_id == "agent-1" && memory_type == "short_term"',
+    });
   });
 
   it("non-empty query + sessionKey + memoryType → combined filter", async () => {

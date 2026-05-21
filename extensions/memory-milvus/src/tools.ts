@@ -92,6 +92,11 @@ export function createMemoryWriteTool(deps: MemoryWriteToolDeps): AnyAgentTool {
       }
 
       try {
+        console.warn(
+          "[memory-milvus] memory_write invoked",
+          `label=${label}`,
+          `textChars=${text.length}`,
+        );
         const ref = await manager.write({
           text,
           provenance: { label },
@@ -100,6 +105,7 @@ export function createMemoryWriteTool(deps: MemoryWriteToolDeps): AnyAgentTool {
           id: ref.id,
           label: (ref.provenance?.label ?? label) as MemorySourceLabel,
         };
+        console.warn("[memory-milvus] memory_write completed", `id=${result.id}`);
         return jsonResult(result);
       } catch (err) {
         return jsonResult({ error: (err as Error).message });

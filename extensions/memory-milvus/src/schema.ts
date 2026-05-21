@@ -31,6 +31,7 @@ export const FIELD_UPDATED_AT = "updated_at";
 export const FIELD_LAST_RECALLED_AT = "last_recalled_at";
 export const FIELD_CONTENT_HASH = "content_hash";
 export const FIELD_SPARSE_BM25 = "sparse_bm25";
+export const FIELD_METADATA = "metadata";
 
 /** All schema field names (including internal vector fields). */
 export const ALL_SCHEMA_FIELDS = [
@@ -61,8 +62,8 @@ export const DEFAULT_EMBEDDING_DIM = 1024;
 /** Default Milvus gRPC port */
 export const DEFAULT_MILVUS_PORT = 19530;
 
-/** text field max length (64KB) */
-export const TEXT_MAX_LENGTH = 65536;
+/** text field max length (Milvus VarChar upper bound) */
+export const TEXT_MAX_LENGTH = 65535;
 
 /** snippet field max length (4KB) */
 export const SNIPPET_MAX_LENGTH = 4096;
@@ -168,5 +169,6 @@ export function entryToInsertData(
     [FIELD_UPDATED_AT]: entry.updatedAt ?? now,
     [FIELD_LAST_RECALLED_AT]: "",
     [FIELD_CONTENT_HASH]: computeContentHash(entry.text, entry.provenance?.label),
+    [FIELD_METADATA]: {},
   };
 }
